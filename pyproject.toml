@@ -1,0 +1,22 @@
+[tool.poetry]
+name = "keep-automation-api"
+version = "0.1.0"
+description = "Keep Automations control-plane API — dedicated service (spec §10.2). D12: FastAPI skeleton with the three exposure tiers (user / machine / internal)."
+authors = ["Keep"]
+readme = "README.md"
+packages = [{ include = "src" }]
+
+[tool.poetry.dependencies]
+python = ">=3.11,<3.14"
+fastapi = "^0.115.6"
+uvicorn = "^0.34.0"
+gunicorn = "^23.0.0"
+python-dotenv = "^0.21.1"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.3.0"
+httpx = "^0.28.1"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
