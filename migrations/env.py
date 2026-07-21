@@ -1,6 +1,9 @@
 import os
 
 from alembic import context
+from dotenv import find_dotenv, load_dotenv
+
+load_dotenv(find_dotenv())
 from sqlalchemy import engine_from_config, pool
 from sqlmodel import SQLModel
 
