@@ -19,8 +19,8 @@ CI_WEBHOOK_TOKEN = os.environ.get("CI_WEBHOOK_TOKEN", "")
 INTERNAL_SERVICE_TOKEN = os.environ.get("INTERNAL_SERVICE_TOKEN", "")
 
 # Database — control-plane Postgres (A0 provisions the instance; A1 owns the
-# schema via Alembic). Roles/grants are applied manually by a DBA — see
-# migrations/manual/dba_grants.sql.
+# schema via Alembic). Roles/grants (event-handler read-only user, spec §3.2)
+# are provisioned out-of-band by a DBA.
 DATABASE_URL = os.environ.get(
     "DATABASE_URL",
     "postgresql+psycopg2://postgres:postgres@127.0.0.1:5434/keep_automations",
