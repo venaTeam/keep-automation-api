@@ -12,6 +12,11 @@ fastapi = "^0.115.6"
 uvicorn = "^0.34.0"
 gunicorn = "^23.0.0"
 python-dotenv = "^0.21.1"
+pydantic = "^1.10.4"
+sqlmodel = "^0.0.22"
+sqlalchemy = "^2.0.14"
+alembic = "^1.13.2"
+psycopg2-binary = "^2.9.9"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3.0"
