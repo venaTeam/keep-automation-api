@@ -18,6 +18,20 @@ AUTH_TYPE = os.environ.get("AUTH_TYPE", "noauth").lower()
 CI_WEBHOOK_TOKEN = os.environ.get("CI_WEBHOOK_TOKEN", "")
 INTERNAL_SERVICE_TOKEN = os.environ.get("INTERNAL_SERVICE_TOKEN", "")
 
+# Database — control-plane Postgres (A0 provisions the instance; A1 owns the schema).
+DATABASE_URL = os.environ.get(
+    "DATABASE_URL",
+    "postgresql+psycopg2://postgres:postgres@127.0.0.1:5434/keep_automations",
+)
+# Role granted SELECT-only on `automations` (event-handler hydration, spec §3.2).
+# Consumed by the grants migration, not by the app at runtime.
+DATABASE_EVENT_HANDLER_ROLE = os.environ.get(
+    "DATABASE_EVENT_HANDLER_ROLE", "keep_event_handler_ro"
+)
+# Optional dedicated writer role for the API (defaults to the migration connection's
+# own role, which owns the tables and needs no explicit grant).
+DATABASE_API_ROLE = os.environ.get("DATABASE_API_ROLE", "")
+
 # CORS — comma-separated trusted browser origins.
 _cors_raw = os.environ.get("KEEP_CORS_TRUSTED_ORIGINS", "*")
 CORS_TRUSTED_ORIGINS = [o.strip() for o in _cors_raw.split(",") if o.strip()] or ["*"]
