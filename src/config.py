@@ -23,7 +23,7 @@ INTERNAL_SERVICE_TOKEN = os.environ.get("INTERNAL_SERVICE_TOKEN", "")
 # are provisioned out-of-band by a DBA.
 DATABASE_URL = os.environ.get(
     "DATABASE_URL",
-    "postgresql+psycopg2://postgres:postgres@127.0.0.1:5434/keep_automations",
+    "postgresql+psycopg2://postgres:postgres@127.0.0.1:5434/automations",
 )
 
 # CORS — comma-separated trusted browser origins.
