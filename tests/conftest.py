@@ -23,42 +23,59 @@ EH_ROLE = "test_event_handler_ro"
 EH_PASSWORD = "test_event_handler_ro"
 
 
+_unreachable_error: str | None = None
+
+
 def _server_reachable() -> bool:
+    global _unreachable_error
     try:
         engine = sa.create_engine(SUPERUSER_URL, poolclass=sa.pool.NullPool)
         with engine.connect():
             return True
-    except sa.exc.OperationalError:
+    except sa.exc.OperationalError as exc:
+        _unreachable_error = str(exc)
         return False
 
 
-def _test_db_url(role: str = "postgres", password: str = "postgres") -> str:
+def _test_db_url(
+    role: str = "postgres",
+    password: str = "postgres",
+    db_name: str = TEST_DB_NAME,
+) -> str:
     base = sa.engine.make_url(SUPERUSER_URL)
     # str(URL) masks the password as "***"; render it verbatim.
     return base.set(
-        username=role, password=password, database=TEST_DB_NAME
+        username=role, password=password, database=db_name
     ).render_as_string(hide_password=False)
+
+
+def recreate_database(db_name: str) -> None:
+    """Drop-and-create a database (and ensure the event-handler role exists)."""
+    admin_engine = sa.create_engine(
+        SUPERUSER_URL, poolclass=sa.pool.NullPool, isolation_level="AUTOCOMMIT"
+    )
+    with admin_engine.connect() as conn:
+        conn.execute(sa.text(f"DROP DATABASE IF EXISTS {db_name} WITH (FORCE)"))
+        conn.execute(sa.text(f"CREATE DATABASE {db_name}"))
+        exists = conn.execute(
+            sa.text("SELECT 1 FROM pg_roles WHERE rolname = :r"), {"r": EH_ROLE}
+        ).scalar()
+        if not exists:
+            conn.execute(
+                sa.text(f"CREATE ROLE \"{EH_ROLE}\" LOGIN PASSWORD '{EH_PASSWORD}'")
+            )
+    admin_engine.dispose()
 
 
 @pytest.fixture(scope="session")
 def migrated_db_url():
     """Fresh test database with the event-handler role and migrations applied."""
     if not _server_reachable():
-        pytest.skip(f"Postgres not reachable at {SUPERUSER_URL}")
-
-    admin_engine = sa.create_engine(
-        SUPERUSER_URL, poolclass=sa.pool.NullPool, isolation_level="AUTOCOMMIT"
-    )
-    with admin_engine.connect() as conn:
-        conn.execute(
-            sa.text(f"DROP DATABASE IF EXISTS {TEST_DB_NAME} WITH (FORCE)")
-        )
-        conn.execute(sa.text(f"CREATE DATABASE {TEST_DB_NAME}"))
-        conn.execute(sa.text(f'DROP ROLE IF EXISTS "{EH_ROLE}"'))
-        conn.execute(
-            sa.text(f"CREATE ROLE \"{EH_ROLE}\" LOGIN PASSWORD '{EH_PASSWORD}'")
+        pytest.skip(
+            f"Postgres not reachable at {SUPERUSER_URL}: {_unreachable_error}"
         )
 
+    recreate_database(TEST_DB_NAME)
     db_url = _test_db_url()
     os.environ["DATABASE_URL"] = db_url
     os.environ["DATABASE_EVENT_HANDLER_ROLE"] = EH_ROLE
@@ -70,6 +87,8 @@ def alembic_config(db_url: str) -> Config:
     cfg = Config(str(REPO_ROOT / "alembic.ini"))
     cfg.set_main_option("script_location", str(REPO_ROOT / "migrations"))
     cfg.set_main_option("sqlalchemy.url", db_url)
+    # env.py gives this precedence over the DATABASE_URL env var.
+    cfg.attributes["sqlalchemy_url"] = db_url
     return cfg
 
 

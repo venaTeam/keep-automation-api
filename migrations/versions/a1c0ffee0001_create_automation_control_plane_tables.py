@@ -57,6 +57,9 @@ ENUM_TYPES = (
 
 
 def upgrade() -> None:
+    # Enum types are created implicitly by the first create_table referencing
+    # them; safe because the whole migration runs in one transaction (Postgres
+    # transactional DDL), so a partial failure rolls the types back too.
     op.create_table(
         "automations",
         sa.Column("id", UUID(as_uuid=True), primary_key=True),

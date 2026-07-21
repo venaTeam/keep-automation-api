@@ -8,7 +8,10 @@ import src.models.db  # noqa: F401 — registers all tables on SQLModel.metadata
 
 config = context.config
 
-database_url = os.environ.get("DATABASE_URL")
+# Precedence: programmatic (config.attributes, e.g. tests) > env var > ini fallback.
+database_url = config.attributes.get("sqlalchemy_url") or os.environ.get(
+    "DATABASE_URL"
+)
 if database_url:
     config.set_main_option("sqlalchemy.url", database_url)
 
@@ -19,6 +22,8 @@ def compare_type(context, inspected_column, metadata_column, inspected_type, met
     # TEXT and unbounded VARCHAR are interchangeable in Postgres; SQLModel maps
     # plain `str` to VARCHAR (AutoString) while the schema uses TEXT — not a
     # real diff. Compare by affinity to also cover TypeDecorator wrappers.
+    # Caveat: this also hides a genuine TEXT → VARCHAR(n) narrowing; safe only
+    # while every string column here is unbounded.
     import sqlalchemy as sa
 
     if (

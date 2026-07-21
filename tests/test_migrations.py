@@ -6,7 +6,13 @@ import sqlalchemy as sa
 from alembic import command
 from alembic.script import ScriptDirectory
 
-from tests.conftest import alembic_config
+from tests.conftest import (
+    EH_PASSWORD,
+    EH_ROLE,
+    _test_db_url,
+    alembic_config,
+    recreate_database,
+)
 
 EXPECTED_TABLES = {"automations", "automation_runs", "automation_revisions"}
 
@@ -91,8 +97,13 @@ def test_event_handler_role_can_select_automations(eh_role_engine):
         " '[]'::jsonb, '/x/script.py', 'x', 'x')",
         "UPDATE automations SET name = 'hacked'",
         "DELETE FROM automations",
+        "INSERT INTO automation_runs (run_id, automation_id, history_id,"
+        " fingerprint, payload, matched_m) VALUES (gen_random_uuid(),"
+        " gen_random_uuid(), 'h', 'fp', '{}'::jsonb, 1)",
+        "INSERT INTO automation_revisions (id, automation_id, action, actor)"
+        " VALUES (gen_random_uuid(), gen_random_uuid(), 'create', 'x')",
     ],
-    ids=["insert", "update", "delete"],
+    ids=["insert", "update", "delete", "insert-runs", "insert-revisions"],
 )
 def test_event_handler_role_cannot_write_automations(eh_role_engine, statement):
     with pytest.raises(sa.exc.ProgrammingError) as excinfo:
@@ -122,10 +133,33 @@ def test_reconciler_scan_uses_state_created_at_index(db_engine):
                 )
             )
         )
+        conn.execute(sa.text("RESET enable_seqscan"))
     assert "ix_automation_runs_state_created_at" in plan
 
 
 def test_downgrade_to_base_and_back(migrated_db_url):
-    cfg = alembic_config(migrated_db_url)
+    # Own database — the destructive downgrade/upgrade cycle must not touch the
+    # schema shared by the other tests. migrated_db_url is still required so the
+    # session env (DATABASE_EVENT_HANDLER_ROLE) is in place for the grants
+    # migration on both passes.
+    cycle_db = "keep_automations_test_cycle"
+    recreate_database(cycle_db)
+    cfg = alembic_config(_test_db_url(db_name=cycle_db))
+    command.upgrade(cfg, "head")
     command.downgrade(cfg, "base")
     command.upgrade(cfg, "head")
+
+    # Grants must be enforced again after the full cycle (REVOKE ran on
+    # downgrade, GRANT re-applied on upgrade).
+    eh_engine = sa.create_engine(
+        _test_db_url(EH_ROLE, EH_PASSWORD, db_name=cycle_db),
+        poolclass=sa.pool.NullPool,
+    )
+    try:
+        with eh_engine.connect() as conn:
+            conn.execute(sa.text("SELECT id FROM automations"))
+        with pytest.raises(sa.exc.ProgrammingError):
+            with eh_engine.begin() as conn:
+                conn.execute(sa.text("DELETE FROM automations"))
+    finally:
+        eh_engine.dispose()
