@@ -18,6 +18,14 @@ AUTH_TYPE = os.environ.get("AUTH_TYPE", "noauth").lower()
 CI_WEBHOOK_TOKEN = os.environ.get("CI_WEBHOOK_TOKEN", "")
 INTERNAL_SERVICE_TOKEN = os.environ.get("INTERNAL_SERVICE_TOKEN", "")
 
+# Database — control-plane Postgres (A0 provisions the instance; A1 owns the
+# schema via Alembic). Roles/grants (event-handler read-only user, spec §3.2)
+# are provisioned out-of-band by a DBA.
+DATABASE_URL = os.environ.get(
+    "DATABASE_URL",
+    "postgresql+psycopg2://postgres:postgres@127.0.0.1:5434/automations",
+)
+
 # CORS — comma-separated trusted browser origins.
 _cors_raw = os.environ.get("KEEP_CORS_TRUSTED_ORIGINS", "*")
 CORS_TRUSTED_ORIGINS = [o.strip() for o in _cors_raw.split(",") if o.strip()] or ["*"]
