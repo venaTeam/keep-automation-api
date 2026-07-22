@@ -1,0 +1,5 @@
+{
+  "field": "logstash_url",
+  "code": "logstash_private_address",
+  "message": "logstash_url resolves to a private or control-plane address."
+}
