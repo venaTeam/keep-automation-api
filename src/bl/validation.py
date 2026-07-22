@@ -9,6 +9,7 @@ Logstash SSRF and the AST contract check live in their own modules
 (`src/bl/ssrf.py`, `src/bl/ast_check.py`) and are stitched in by
 `validate_automation`.
 """
+from src.bl import ssrf
 from src.bl.namespaces import validate_namespace
 from src.contracts.field_allowlist import MATCHABLE_FIELDS
 from src.contracts.limits import (
@@ -159,4 +160,5 @@ def validate_automation(data: AutomationIn) -> list[FieldError]:
     errors.extend(validate_cooldown(data.cooldown_seconds, data.cooldown_fields))
     errors.extend(validate_timeout(data.timeout_seconds))
     errors.extend(validate_grace(data.grace_seconds))
+    errors.extend(ssrf.validate_logstash_url(data.logstash_url))
     return errors
