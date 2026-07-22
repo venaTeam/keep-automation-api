@@ -65,6 +65,31 @@ def test_git_failure_rolls_back_both_rows(test_engine):
     assert row_counts(test_engine) == (0, 0)
 
 
+def test_git_failure_on_update_rolls_back_row_changes(test_engine):
+    git = InMemoryGitClient()
+    automation = automations_bl.create_automation(
+        AutomationIn(**VALID), actor="alice@keep", git=git
+    )
+    with test_engine.begin() as conn:
+        conn.execute(text("UPDATE automations SET build_state = 'idle'"))
+
+    with pytest.raises(RuntimeError):
+        automations_bl.update_automation(
+            automation.id,
+            AutomationIn(**{**VALID, "name": "renamed"}),
+            actor="bob@keep",
+            git=ExplodingGitClient(),
+        )
+    # No edit revision, name unchanged, build lock not re-armed.
+    assert row_counts(test_engine) == (1, 1)
+    with test_engine.connect() as conn:
+        name, build_state = conn.execute(
+            text("SELECT name, build_state FROM automations")
+        ).one()
+    assert name == VALID["name"]
+    assert build_state == "idle"
+
+
 def test_invalid_payload_raises_accumulated_errors(test_engine):
     bad = AutomationIn(**{**VALID, "triggers": [{"field": "message", "value": "x"}]})
     with pytest.raises(AutomationValidationError) as excinfo:

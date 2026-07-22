@@ -124,6 +124,20 @@ def test_put_missing_returns_404(client):
     assert client.put(f"/automations/{uuid4()}", json=VALID).status_code == 404
 
 
+def test_put_invalid_payload_returns_accumulating_400(client, test_engine):
+    created = client.post("/automations", json=VALID).json()
+    with test_engine.begin() as conn:
+        conn.execute(text("UPDATE automations SET build_state = 'idle'"))
+
+    resp = client.put(
+        f"/automations/{created['id']}",
+        json={**VALID, "triggers": [{"field": "message", "value": "x"}]},
+    )
+    assert resp.status_code == 400
+    codes = {e["code"] for e in resp.json()["errors"]}
+    assert {"triggers_too_few", "unknown_field"} <= codes
+
+
 # --- alert schema -------------------------------------------------------
 
 def test_alert_schema_fields_serves_allowlist(client):

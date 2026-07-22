@@ -64,6 +64,10 @@ def test_cooldown_over_max_rejected():
 def test_cooldown_at_max_ok():
     assert validate_cooldown(COOLDOWN_SECONDS_MAX, ["site"]) == []
 
+def test_cooldown_zero_rejected():
+    errors = validate_cooldown(0, ["site"])
+    assert ErrorCode.COOLDOWN_OUT_OF_RANGE.value in codes(errors)
+
 def test_cooldown_seconds_without_fields_rejected():
     errors = validate_cooldown(300, None)
     assert ErrorCode.COOLDOWN_FIELDS_REQUIRED.value in codes(errors)
