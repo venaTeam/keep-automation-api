@@ -1,0 +1,493 @@
+{
+  "__note__": [
+    "GOLDEN SCHEMA FIXTURE for the automation control-plane tables.",
+    "Vendored BYTE-IDENTICALLY into two repos:",
+    "  keep-api-gateway/tests/fixtures/automation_schema.json",
+    "  keep-automation-api/tests/fixtures/automation_schema.json",
+    "The DDL lives in keep-api-gateway (src/models/db/migrations/versions/2026-07-30-00-00_create_automation_tables.py); the ORM models live in keep-automation-api (src/models/db/). Neither repo's CI checks out the other, so each asserts against its own copy of this file.",
+    "RULE: any change to the automation schema updates the migration, the models, and BOTH copies of this fixture in the same change set.",
+    "Regenerate with tests/fixtures/automation_schema_dump.py (see its docstring for the normalization rules) and copy the result to both repos unchanged."
+  ],
+  "tables": {
+    "automation_revisions": {
+      "columns": [
+        {
+          "enum_values": [
+            "create",
+            "edit",
+            "enable",
+            "disable",
+            "delete"
+          ],
+          "name": "action",
+          "nullable": false,
+          "server_default": null,
+          "type": "automation_revision_action"
+        },
+        {
+          "name": "actor",
+          "nullable": false,
+          "server_default": null,
+          "type": "VARCHAR"
+        },
+        {
+          "name": "automation_id",
+          "nullable": false,
+          "server_default": null,
+          "type": "UUID"
+        },
+        {
+          "name": "created_at",
+          "nullable": false,
+          "server_default": "now()",
+          "type": "TIMESTAMP WITH TIME ZONE"
+        },
+        {
+          "name": "git_sha",
+          "nullable": true,
+          "server_default": null,
+          "type": "VARCHAR"
+        },
+        {
+          "name": "id",
+          "nullable": false,
+          "server_default": null,
+          "type": "UUID"
+        },
+        {
+          "name": "resulting_digest",
+          "nullable": true,
+          "server_default": null,
+          "type": "VARCHAR"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "constrained_columns": [
+            "automation_id"
+          ],
+          "referred_columns": [
+            "id"
+          ],
+          "referred_table": "automations"
+        }
+      ],
+      "indexes": [
+        {
+          "columns": [
+            "automation_id",
+            "created_at"
+          ],
+          "name": "ix_automation_revisions_automation_id_created_at",
+          "unique": false
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_constraints": []
+    },
+    "automation_runs": {
+      "columns": [
+        {
+          "name": "attempts",
+          "nullable": true,
+          "server_default": null,
+          "type": "SMALLINT"
+        },
+        {
+          "name": "automation_digest",
+          "nullable": true,
+          "server_default": null,
+          "type": "VARCHAR"
+        },
+        {
+          "name": "automation_id",
+          "nullable": false,
+          "server_default": null,
+          "type": "UUID"
+        },
+        {
+          "name": "created_at",
+          "nullable": false,
+          "server_default": "now()",
+          "type": "TIMESTAMP WITH TIME ZONE"
+        },
+        {
+          "enum_values": [
+            "transient",
+            "permanent",
+            "deadline",
+            "unclassified",
+            "infra",
+            "terminated_by_deletion"
+          ],
+          "name": "failure_class",
+          "nullable": true,
+          "server_default": null,
+          "type": "automation_failure_class"
+        },
+        {
+          "name": "fingerprint",
+          "nullable": false,
+          "server_default": null,
+          "type": "VARCHAR"
+        },
+        {
+          "name": "finished_at",
+          "nullable": true,
+          "server_default": null,
+          "type": "TIMESTAMP WITH TIME ZONE"
+        },
+        {
+          "name": "gate_flags",
+          "nullable": true,
+          "server_default": null,
+          "type": "JSONB"
+        },
+        {
+          "name": "history_id",
+          "nullable": false,
+          "server_default": null,
+          "type": "VARCHAR"
+        },
+        {
+          "name": "matched_m",
+          "nullable": false,
+          "server_default": null,
+          "type": "SMALLINT"
+        },
+        {
+          "name": "outcome_status",
+          "nullable": true,
+          "server_default": null,
+          "type": "VARCHAR"
+        },
+        {
+          "name": "payload",
+          "nullable": false,
+          "server_default": null,
+          "type": "JSONB"
+        },
+        {
+          "name": "result",
+          "nullable": true,
+          "server_default": null,
+          "type": "JSONB"
+        },
+        {
+          "name": "run_id",
+          "nullable": false,
+          "server_default": null,
+          "type": "UUID"
+        },
+        {
+          "enum_values": [
+            "pending",
+            "submitted",
+            "succeeded",
+            "failed",
+            "stalled",
+            "suppressed"
+          ],
+          "name": "state",
+          "nullable": false,
+          "server_default": "pending",
+          "type": "automation_run_state"
+        },
+        {
+          "name": "submitted_at",
+          "nullable": true,
+          "server_default": null,
+          "type": "TIMESTAMP WITH TIME ZONE"
+        },
+        {
+          "enum_values": [
+            "duplicate",
+            "cooldown"
+          ],
+          "name": "suppression_reason",
+          "nullable": true,
+          "server_default": null,
+          "type": "automation_suppression_reason"
+        },
+        {
+          "name": "tenant_id",
+          "nullable": false,
+          "server_default": null,
+          "type": "VARCHAR"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "constrained_columns": [
+            "automation_id"
+          ],
+          "referred_columns": [
+            "id"
+          ],
+          "referred_table": "automations"
+        },
+        {
+          "constrained_columns": [
+            "tenant_id"
+          ],
+          "referred_columns": [
+            "id"
+          ],
+          "referred_table": "tenant"
+        }
+      ],
+      "indexes": [
+        {
+          "columns": [
+            "automation_id",
+            "created_at"
+          ],
+          "name": "ix_automation_runs_automation_id_created_at",
+          "unique": false
+        },
+        {
+          "columns": [
+            "state",
+            "created_at"
+          ],
+          "name": "ix_automation_runs_state_created_at",
+          "unique": false
+        }
+      ],
+      "primary_key": [
+        "run_id"
+      ],
+      "unique_constraints": [
+        {
+          "columns": [
+            "history_id",
+            "automation_id"
+          ],
+          "name": "uq_automation_runs_history_automation"
+        }
+      ]
+    },
+    "automations": {
+      "columns": [
+        {
+          "name": "active_digest",
+          "nullable": true,
+          "server_default": null,
+          "type": "VARCHAR"
+        },
+        {
+          "name": "build_lock_deadline",
+          "nullable": true,
+          "server_default": null,
+          "type": "TIMESTAMP WITH TIME ZONE"
+        },
+        {
+          "enum_values": [
+            "idle",
+            "building",
+            "build_failed"
+          ],
+          "name": "build_state",
+          "nullable": false,
+          "server_default": "idle",
+          "type": "automation_build_state"
+        },
+        {
+          "name": "building_sha",
+          "nullable": true,
+          "server_default": null,
+          "type": "VARCHAR"
+        },
+        {
+          "name": "capp_deployment_id",
+          "nullable": true,
+          "server_default": null,
+          "type": "VARCHAR"
+        },
+        {
+          "name": "contract_version",
+          "nullable": true,
+          "server_default": null,
+          "type": "VARCHAR"
+        },
+        {
+          "name": "cooldown_fields",
+          "nullable": true,
+          "server_default": null,
+          "type": "JSONB"
+        },
+        {
+          "name": "cooldown_seconds",
+          "nullable": true,
+          "server_default": null,
+          "type": "INTEGER"
+        },
+        {
+          "name": "created_at",
+          "nullable": false,
+          "server_default": "now()",
+          "type": "TIMESTAMP WITH TIME ZONE"
+        },
+        {
+          "name": "created_by",
+          "nullable": false,
+          "server_default": null,
+          "type": "VARCHAR"
+        },
+        {
+          "name": "delete_cascade_step",
+          "nullable": true,
+          "server_default": null,
+          "type": "SMALLINT"
+        },
+        {
+          "name": "deployment_url",
+          "nullable": true,
+          "server_default": null,
+          "type": "VARCHAR"
+        },
+        {
+          "name": "grace_seconds",
+          "nullable": false,
+          "server_default": "300",
+          "type": "SMALLINT"
+        },
+        {
+          "name": "id",
+          "nullable": false,
+          "server_default": null,
+          "type": "UUID"
+        },
+        {
+          "name": "index_generation",
+          "nullable": false,
+          "server_default": "0",
+          "type": "BIGINT"
+        },
+        {
+          "name": "logstash_url",
+          "nullable": true,
+          "server_default": null,
+          "type": "VARCHAR"
+        },
+        {
+          "enum_values": [
+            "inactive",
+            "active",
+            "deleting",
+            "deleted"
+          ],
+          "name": "matching_state",
+          "nullable": false,
+          "server_default": "inactive",
+          "type": "automation_matching_state"
+        },
+        {
+          "name": "name",
+          "nullable": false,
+          "server_default": null,
+          "type": "VARCHAR"
+        },
+        {
+          "name": "namespace",
+          "nullable": false,
+          "server_default": null,
+          "type": "VARCHAR"
+        },
+        {
+          "name": "script_path",
+          "nullable": false,
+          "server_default": null,
+          "type": "VARCHAR"
+        },
+        {
+          "name": "secret_name",
+          "nullable": true,
+          "server_default": null,
+          "type": "VARCHAR"
+        },
+        {
+          "name": "tenant_id",
+          "nullable": false,
+          "server_default": null,
+          "type": "VARCHAR"
+        },
+        {
+          "name": "timeout_seconds",
+          "nullable": true,
+          "server_default": null,
+          "type": "INTEGER"
+        },
+        {
+          "name": "triggers",
+          "nullable": false,
+          "server_default": null,
+          "type": "JSONB"
+        },
+        {
+          "name": "updated_at",
+          "nullable": false,
+          "server_default": "now()",
+          "type": "TIMESTAMP WITH TIME ZONE"
+        },
+        {
+          "name": "updated_by",
+          "nullable": false,
+          "server_default": null,
+          "type": "VARCHAR"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "constrained_columns": [
+            "tenant_id"
+          ],
+          "referred_columns": [
+            "id"
+          ],
+          "referred_table": "tenant"
+        }
+      ],
+      "indexes": [
+        {
+          "columns": [
+            "build_state",
+            "build_lock_deadline"
+          ],
+          "name": "ix_automations_build_state_lock",
+          "unique": false
+        },
+        {
+          "columns": [
+            "matching_state",
+            "tenant_id"
+          ],
+          "name": "ix_automations_matching_state_tenant_id",
+          "unique": false
+        },
+        {
+          "columns": [
+            "tenant_id",
+            "created_at"
+          ],
+          "name": "ix_automations_tenant_id_created_at",
+          "unique": false
+        },
+        {
+          "columns": [
+            "tenant_id",
+            "namespace"
+          ],
+          "name": "ix_automations_tenant_id_namespace",
+          "unique": false
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_constraints": []
+    }
+  }
+}
