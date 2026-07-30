@@ -34,6 +34,7 @@ the `test_engine` fixture injects the test engine into that module global so
 every code path (routes, BL, direct sessions) hits the test database.
 """
 import os
+from contextlib import ExitStack
 from pathlib import Path
 
 import pytest
@@ -44,6 +45,7 @@ from sqlmodel import SQLModel
 
 import src.core.db as db_core
 import src.models.db  # noqa: F401  registers the automation tables on the metadata
+from src.api.deps import get_authenticated_entity
 from src.main import get_app
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -136,3 +138,24 @@ def client(test_engine):
     app = get_app()
     with TestClient(app) as test_client:
         yield test_client
+
+
+@pytest.fixture()
+def client_as(test_engine):
+    """Factory for a client authenticated as an arbitrary tenant.
+
+    The noauth shim hardcodes one tenant, so cross-tenant HTTP behaviour is only
+    reachable by overriding the identity dependency — the same seam the real
+    identity manager will occupy.
+    """
+    with ExitStack() as stack:
+
+        def _make(tenant_id: str) -> TestClient:
+            app = get_app()
+            app.dependency_overrides[get_authenticated_entity] = lambda: {
+                "tenant_id": tenant_id,
+                "email": f"author@{tenant_id}",
+            }
+            return stack.enter_context(TestClient(app))
+
+        yield _make
