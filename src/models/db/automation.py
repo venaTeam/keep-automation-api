@@ -46,11 +46,14 @@ class Automation(SQLModel, table=True):
         # hydrates every tenant in one `WHERE matching_state = 'active'` pass per
         # reload, so a tenant-leading index could not serve it; `tenant_id` rides
         # second to keep that read covering.
-        Index("ix_automations_matching_state_tenant", "matching_state", "tenant_id"),
+        # Names must match the keep-api-gateway revision that actually creates
+        # these indexes (`create_automation_tables`) — that migration is the DB
+        # truth; this declaration only builds the test schema.
+        Index("ix_automations_matching_state_tenant_id", "matching_state", "tenant_id"),
         # Deliberately cross-tenant: an infra repair scan, not a user read.
         Index("ix_automations_build_state_lock", "build_state", "build_lock_deadline"),
-        Index("ix_automations_tenant_namespace", "tenant_id", "namespace"),
-        Index("ix_automations_tenant_created_at", "tenant_id", "created_at"),
+        Index("ix_automations_tenant_id_namespace", "tenant_id", "namespace"),
+        Index("ix_automations_tenant_id_created_at", "tenant_id", "created_at"),
     )
 
     id: UUID = Field(default_factory=uuid4, primary_key=True)
