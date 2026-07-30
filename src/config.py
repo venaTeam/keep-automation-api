@@ -67,6 +67,24 @@ DB_HEALTHCHECK_TIMEOUT_MS = int(
     os.environ.get("DATABASE_HEALTHCHECK_TIMEOUT_MS", "2000")
 )
 
+# Connection pool. Tunable because the connection budget is now SHARED: this
+# service, keep-api-gateway, keep-event-handler and keep-workflows all draw from
+# one Postgres. The container runs `gunicorn -w 4`, so the per-process numbers
+# below multiply by four — 12 connections steady, 24 at peak. Variable names
+# match the platform-wide ones (keep-api-gateway/keep-event-handler
+# src/config/consts.py) so one deploy setting configures every service.
+#
+# Deliberately below SQLAlchemy's 5+10 default: today's traffic is authoring
+# CRUD, a handful of concurrent users. The ~200 submits/s path (D17) is not
+# built yet and will need these revisited — size it against the shared budget
+# then, not by taking whatever is left.
+DB_POOL_SIZE = int(os.environ.get("DATABASE_POOL_SIZE", "3"))
+DB_MAX_OVERFLOW = int(os.environ.get("DATABASE_MAX_OVERFLOW", "3"))
+# Wait for a free connection before giving up. Short on purpose: under pool
+# exhaustion a fast 503 from readiness is better than requests queueing past the
+# client's own timeout.
+DB_POOL_TIMEOUT = int(os.environ.get("DATABASE_POOL_TIMEOUT", "10"))
+
 # CORS — comma-separated trusted browser origins.
 _cors_raw = os.environ.get("KEEP_CORS_TRUSTED_ORIGINS", "*")
 CORS_TRUSTED_ORIGINS = [o.strip() for o in _cors_raw.split(",") if o.strip()] or ["*"]

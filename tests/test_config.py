@@ -60,3 +60,22 @@ def test_redacted_url_keeps_host_and_database_but_masks_the_password(monkeypatch
 def test_redacted_url_survives_a_malformed_dsn(monkeypatch):
     monkeypatch.setattr(config, "DATABASE_URL", "this is not a dsn")
     assert db_core.redacted_database_url() == "<unparseable DSN>"
+
+
+def test_engine_honours_the_configured_pool_knobs(monkeypatch):
+    """The connection budget is shared with three other services, so these must
+    be tunable without a code change — assert they actually reach the pool."""
+    monkeypatch.setattr(config, "DB_POOL_SIZE", 7)
+    monkeypatch.setattr(config, "DB_MAX_OVERFLOW", 2)
+    monkeypatch.setattr(config, "DB_POOL_TIMEOUT", 4)
+    # Force a rebuild; monkeypatch restores the injected test engine afterwards.
+    monkeypatch.setattr(db_core, "_engine", None)
+
+    engine = db_core.get_engine()
+    try:
+        assert engine.pool.size() == 7
+        # max_overflow and timeout have no public accessor on QueuePool.
+        assert engine.pool._max_overflow == 2
+        assert engine.pool._timeout == 4
+    finally:
+        engine.dispose()

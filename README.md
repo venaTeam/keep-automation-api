@@ -47,8 +47,16 @@ Readiness connects on purpose: nothing else in this service touches the database
 at startup (the engine is lazy, the lifespan does no DB work), so a pod pointed
 at the wrong DSN would otherwise report healthy and 500 every request. Liveness
 stays DB-free so a database outage degrades readiness instead of restarting pods.
-The probe is bounded by `DATABASE_CONNECT_TIMEOUT` and
+The probe is bounded by `DATABASE_CONNECT_TIMEOUT`, `DATABASE_POOL_TIMEOUT` and
 `DATABASE_HEALTHCHECK_TIMEOUT_MS`.
+
+### Connection pool
+
+`DATABASE_POOL_SIZE` (3) and `DATABASE_MAX_OVERFLOW` (3) are **per gunicorn
+worker**, and the container runs `-w 4` — so 12 connections steady, 24 at peak.
+They are below SQLAlchemy's 5+10 defaults because the Postgres connection budget
+is now shared with the gateway, event-handler and workflows, and today's traffic
+is authoring CRUD. The ~200 submits/s path (D17) will need these revisited.
 
 ## Exposure tiers (spec §8, §3.4)
 

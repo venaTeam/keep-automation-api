@@ -25,6 +25,13 @@ def get_engine() -> Engine:
         _engine = create_engine(
             config.DATABASE_URL,
             pool_pre_ping=True,
+            # Explicit, tunable pool: the connection budget is shared with
+            # gateway / event-handler / workflows, and `gunicorn -w 4` multiplies
+            # whatever is set here by four. See src/config.py for the sizing
+            # rationale and the D17 caveat.
+            pool_size=config.DB_POOL_SIZE,
+            max_overflow=config.DB_MAX_OVERFLOW,
+            pool_timeout=config.DB_POOL_TIMEOUT,
             # Bounds the TCP/auth handshake. Without it a black-holed host hangs
             # until the OS gives up, which is far longer than any probe budget.
             connect_args={"connect_timeout": config.DB_CONNECT_TIMEOUT},
