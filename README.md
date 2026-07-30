@@ -31,6 +31,24 @@ Consequences:
 
 Set `DATABASE_URL` to the `keep` DSN (default
 `postgresql://keep:keep@localhost:5432/keep`, matching keep-event-handler).
+**`DATABASE_CONNECTION_STRING` is accepted as a fallback** — that is the name the
+gateway, event-handler and workflows read, and all four services now need the
+same DSN, so a deploy that sets only the platform-wide name still configures this
+one. `DATABASE_URL` wins when both are set.
+
+## Health probes
+
+| Path | Probe | Touches DB |
+|---|---|---|
+| `/healthcheck` | **readiness** | yes — bounded `SELECT 1` |
+| `/livez` | **liveness** | no |
+
+Readiness connects on purpose: nothing else in this service touches the database
+at startup (the engine is lazy, the lifespan does no DB work), so a pod pointed
+at the wrong DSN would otherwise report healthy and 500 every request. Liveness
+stays DB-free so a database outage degrades readiness instead of restarting pods.
+The probe is bounded by `DATABASE_CONNECT_TIMEOUT` and
+`DATABASE_HEALTHCHECK_TIMEOUT_MS`.
 
 ## Exposure tiers (spec §8, §3.4)
 

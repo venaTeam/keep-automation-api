@@ -11,6 +11,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 
 from sqlalchemy.engine import Engine
+from sqlalchemy.engine.url import make_url
 from sqlmodel import Session, create_engine
 
 from src import config
@@ -21,8 +22,50 @@ _engine: Engine | None = None
 def get_engine() -> Engine:
     global _engine
     if _engine is None:
-        _engine = create_engine(config.DATABASE_URL, pool_pre_ping=True)
+        _engine = create_engine(
+            config.DATABASE_URL,
+            pool_pre_ping=True,
+            # Bounds the TCP/auth handshake. Without it a black-holed host hangs
+            # until the OS gives up, which is far longer than any probe budget.
+            connect_args={"connect_timeout": config.DB_CONNECT_TIMEOUT},
+        )
     return _engine
+
+
+def redacted_database_url() -> str:
+    """The configured DSN with the password masked — safe to log.
+
+    Logged once at startup (src/main.py) so "which database did this pod
+    actually get" is greppable instead of being guessed from 500s.
+    """
+    try:
+        return make_url(config.DATABASE_URL).render_as_string(hide_password=True)
+    except Exception:
+        # Never let a malformed DSN break startup logging — the failure will
+        # surface loudly on the first connection attempt anyway.
+        return "<unparseable DSN>"
+
+
+def check_database() -> None:
+    """Readiness probe: `SELECT 1` against the configured database.
+
+    Raises on any failure; the caller turns that into a 503. Fully bounded so a
+    slow database degrades readiness rather than hanging the endpoint:
+    `pool_timeout` caps the wait for a pooled connection, `connect_timeout` caps
+    the handshake, and `statement_timeout` caps the query itself.
+
+    Deliberately uses the application engine, not a private one — a probe on a
+    separate pool would report healthy while the pool every real request draws
+    from is exhausted.
+    """
+    with get_engine().connect() as conn:
+        with conn.begin():
+            # SET LOCAL scopes the timeout to this transaction, so the setting
+            # cannot leak back into the pool and shorten unrelated queries.
+            conn.exec_driver_sql(
+                f"SET LOCAL statement_timeout = {config.DB_HEALTHCHECK_TIMEOUT_MS}"
+            )
+            conn.exec_driver_sql("SELECT 1")
 
 
 @contextmanager

@@ -4,6 +4,7 @@ Skeleton (D12): only what the app shell needs. Concrete values (tokens, DB DSN,
 CAPP identity) are provisioned by A0 and consumed by later stories.
 """
 import os
+from collections.abc import Mapping
 
 # Service
 KEEP_VERSION = os.environ.get("KEEP_VERSION", "0.1.0")
@@ -27,11 +28,43 @@ INTERNAL_SERVICE_TOKEN = os.environ.get("INTERNAL_SERVICE_TOKEN", "")
 # keep-api-gateway. This service owns the ORM models, not the schema lineage,
 # and this repo has no `alembic.ini`/`migrations/`.
 #
-# Default mirrors keep-event-handler's DB_CONNECTION_STRING default so a local
-# run points at the same instance without extra config.
-DATABASE_URL = os.environ.get(
-    "DATABASE_URL",
-    "postgresql://keep:keep@localhost:5432/keep",
+# TWO ACCEPTED VARIABLE NAMES, ON PURPOSE — do not "clean this up".
+# Every other service on this same database reads DATABASE_CONNECTION_STRING
+# (keep-api-gateway src/config/consts.py, keep-event-handler
+# src/config/consts.py, keep-workflows src/common/core/db_utils.py). While this
+# service had a private database the divergent name was harmless; now that all
+# four need the *same* DSN, a deploy that sets only the platform-wide name would
+# configure three services and silently miss this one. That miss is invisible —
+# the engine is lazy and nothing connects at startup, so the pod goes Ready and
+# every request 500s instead. Accepting both names removes the trap.
+# DATABASE_URL still wins so an existing per-service override keeps working.
+DATABASE_URL_ENV_VARS = ("DATABASE_URL", "DATABASE_CONNECTION_STRING")
+
+# Mirrors keep-event-handler's DB_CONNECTION_STRING default so a local run
+# points at the same instance without extra config.
+DEFAULT_DATABASE_URL = "postgresql://keep:keep@localhost:5432/keep"
+
+
+def resolve_database_url(environ: Mapping[str, str]) -> tuple[str, str]:
+    """Return (dsn, source) — `source` is the variable it came from, or "default".
+
+    Takes the environment as an argument so the precedence is testable without
+    reimporting this module.
+    """
+    for name in DATABASE_URL_ENV_VARS:
+        value = environ.get(name)
+        if value:
+            return value, name
+    return DEFAULT_DATABASE_URL, "default"
+
+
+DATABASE_URL, DATABASE_URL_SOURCE = resolve_database_url(os.environ)
+
+# Bounds on the readiness probe's `SELECT 1` so a slow or black-holed database
+# cannot turn the health endpoint into a hung request.
+DB_CONNECT_TIMEOUT = int(os.environ.get("DATABASE_CONNECT_TIMEOUT", "3"))
+DB_HEALTHCHECK_TIMEOUT_MS = int(
+    os.environ.get("DATABASE_HEALTHCHECK_TIMEOUT_MS", "2000")
 )
 
 # CORS — comma-separated trusted browser origins.

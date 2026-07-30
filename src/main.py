@@ -22,6 +22,16 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting keep-automation-api (skeleton)")
+    # Announce the resolved DB target once, credentials redacted. Nothing here
+    # connects (the engine is lazy), so this line plus /healthcheck are the only
+    # ways a wrong-DSN deploy becomes visible before requests start failing.
+    from src.core import db as db_core
+
+    logger.info(
+        "Database target: %s (DSN from %s)",
+        db_core.redacted_database_url(),
+        config.DATABASE_URL_SOURCE,
+    )
     yield
     logger.info("Shutting down keep-automation-api")
 
