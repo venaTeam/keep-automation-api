@@ -36,6 +36,20 @@ def test_tenant_id_is_a_real_not_null_foreign_key(test_engine):
     assert "tenant_id" not in revision_columns
 
 
+def test_revision_history_read_is_indexed(test_engine):
+    """Postgres does not index FK columns; without this the history read seq
+    scans. The name is shared with keep-api-gateway's migration — a rename here
+    is cross-repo drift, so assert it exactly."""
+    indexes = {
+        idx["name"]: tuple(idx["column_names"])
+        for idx in inspect(test_engine).get_indexes("automation_revisions")
+    }
+    assert indexes["ix_automation_revisions_automation_id_created_at"] == (
+        "automation_id",
+        "created_at",
+    )
+
+
 def test_engine_injected_into_app_module(test_engine):
     import src.core.db as db_core
 
