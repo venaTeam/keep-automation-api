@@ -5,10 +5,32 @@ Control-plane API for the Keep **Automations** feature — a **dedicated service
 tables, the CI webhook, SSE to the UI, git commits, and CAPP deploy/rollouts, and
 custodies the single CAPP service identity.
 
-> **Status: D12 skeleton.** This repo currently contains only the FastAPI
-> application shell and the three exposure-tier routers with **stub routes and no
-> business logic**. Endpoints are filled in by later stories (D13–D20). The DB
-> schema + migrations land in **A1**.
+> **Status: authoring CRUD.** The FastAPI shell, the three exposure-tier routers
+> and the authoring CRUD endpoints are in place; submit, the CI webhook, the
+> reconciler and SSE payloads are still stubs (D14–D20).
+
+## Database
+
+The automation tables (`automations`, `automation_runs`, `automation_revisions`)
+live in the **shared platform `keep` database, `public` schema** — the same
+database as `alert`, `incident` and `tenant`, **not** a separate `automations`
+database. That co-location is what lets `automations.tenant_id` be an **enforced
+FK to `tenant.id`** (Postgres has no cross-database foreign keys).
+
+Consequences:
+
+- **Migrations live in keep-api-gateway's Alembic**, the single lineage for that
+  database. This repo owns the ORM models (`src/models/db/`) and has **no**
+  `alembic.ini` / `migrations/` of its own.
+- This service is the tables' **sole writer as a code-level convention**, not a
+  database guarantee — there are no grants and no read-only role. keep-event-handler
+  reads them over the shared engine inside a per-transaction read-only transaction.
+- Every automation query is **tenant-scoped**. `tenant_id` is server-derived from
+  the authenticated entity and never accepted from a request body; an id
+  belonging to another tenant is a `404`, never a `403`.
+
+Set `DATABASE_URL` to the `keep` DSN (default
+`postgresql://keep:keep@localhost:5432/keep`, matching keep-event-handler).
 
 ## Exposure tiers (spec §8, §3.4)
 
@@ -26,7 +48,7 @@ vendored.
 
 ```bash
 poetry install
-poetry run uvicorn src.main:app --reload --port 8080
+poetry run uvicorn src.main:app --reload --port 8083   # 8080 is keep-api-gateway's
 ```
 
 ## Test
@@ -35,9 +57,12 @@ poetry run uvicorn src.main:app --reload --port 8080
 poetry run pytest
 ```
 
-## Deferred (not in this skeleton)
+DB-backed tests stand up a disposable Postgres (`tests/docker-compose.test.yml`)
+and build the schema from this repo's ORM metadata plus a minimal `tenant`
+stand-in — see the note at the top of `tests/conftest.py`.
 
-- DB schema / models / Alembic migrations — **A1**.
-- Business endpoints (authoring, submit, reconciler, runs, SSE payloads) — **D13–D20**.
+## Deferred
+
+- Business endpoints (submit, reconciler, CI webhook, runs, SSE payloads) — **D14–D20**.
 - Deploy + NetworkPolicy manifests — handled out-of-repo (A0 infra).
 - Real identity-provider integration + tier token verification.

@@ -18,12 +18,20 @@ AUTH_TYPE = os.environ.get("AUTH_TYPE", "noauth").lower()
 CI_WEBHOOK_TOKEN = os.environ.get("CI_WEBHOOK_TOKEN", "")
 INTERNAL_SERVICE_TOKEN = os.environ.get("INTERNAL_SERVICE_TOKEN", "")
 
-# Database — control-plane Postgres (A0 provisions the instance; A1 owns the
-# schema via Alembic). Roles/grants (event-handler read-only user, spec §3.2)
-# are provisioned out-of-band by a DBA.
+# Database — the shared platform `keep` Postgres (spec §4.4). The automation
+# tables live in its `public` schema alongside `alert`, `incident` and `tenant`;
+# co-location is what makes `automations.tenant_id` an enforced FK. There is no
+# separate `automations` database and no separate DSN.
+#
+# One database ⇒ one Alembic lineage: these tables' migrations live in
+# keep-api-gateway. This service owns the ORM models, not the schema lineage,
+# and this repo has no `alembic.ini`/`migrations/`.
+#
+# Default mirrors keep-event-handler's DB_CONNECTION_STRING default so a local
+# run points at the same instance without extra config.
 DATABASE_URL = os.environ.get(
     "DATABASE_URL",
-    "postgresql+psycopg2://postgres:postgres@127.0.0.1:5434/automations",
+    "postgresql://keep:keep@localhost:5432/keep",
 )
 
 # CORS — comma-separated trusted browser origins.

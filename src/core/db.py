@@ -1,7 +1,11 @@
-"""Database engine/session for the control-plane Postgres.
+"""Database engine/session for the shared platform `keep` Postgres.
+
+The automation tables live in the same database and schema as the rest of the
+platform (spec §4.4); `config.DATABASE_URL` is that database's DSN. This service
+is the tables' sole writer by convention only — the database enforces nothing.
 
 Lazy singleton engine — created on first use so importing models never requires
-a reachable database (migrations and tests manage their own connections).
+a reachable database (tests manage their own connections).
 """
 from collections.abc import Iterator
 from contextlib import contextmanager
