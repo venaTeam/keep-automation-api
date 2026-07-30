@@ -1,8 +1,17 @@
-"""`automations` — one row per automation definition (spec §4.4, rev 4 / CAPP).
+"""`automations` — one row per automation definition (spec §4.4, rev 5 / CAPP).
 
-Owned exclusively by this service (sole writer; the event-handler user gets
-SELECT-only, provisioned out-of-band by a DBA). Rows persist forever — delete
-flips state, nothing is row-deleted, hence no cascade-delete FKs.
+Lives in the **`keep` database, `public` schema** — the same database as `alert`,
+`incident` and `tenant` — so `tenant_id` can be a real FK (Postgres has no
+cross-database foreign keys). Migrations for this table live in
+**keep-api-gateway's Alembic**, the single lineage for that database; this repo
+owns the model, not the lineage.
+
+Written exclusively by this service. That is a **code-level convention**, not a
+database guarantee: keep-event-handler reads these tables over the shared engine
+and no grant separates the roles.
+
+Rows persist forever — delete flips state, nothing is row-deleted, hence no
+cascade-delete FKs.
 
 Enum string values pinned in automation-contracts.md §"DB enums".
 """
@@ -33,12 +42,23 @@ class BuildState(str, Enum):
 class Automation(SQLModel, table=True):
     __tablename__ = "automations"
     __table_args__ = (
-        Index("ix_automations_matching_state", "matching_state"),
+        # Hydration index (§4.4). `matching_state` LEADS on purpose: the matcher
+        # hydrates every tenant in one `WHERE matching_state = 'active'` pass per
+        # reload, so a tenant-leading index could not serve it; `tenant_id` rides
+        # second to keep that read covering.
+        Index("ix_automations_matching_state_tenant", "matching_state", "tenant_id"),
+        # Deliberately cross-tenant: an infra repair scan, not a user read.
         Index("ix_automations_build_state_lock", "build_state", "build_lock_deadline"),
-        Index("ix_automations_namespace", "namespace"),
+        Index("ix_automations_tenant_namespace", "tenant_id", "namespace"),
+        Index("ix_automations_tenant_created_at", "tenant_id", "created_at"),
     )
 
     id: UUID = Field(default_factory=uuid4, primary_key=True)
+    # Owning tenant — same shape as every other tenant-scoped platform table
+    # (keep-api-gateway/src/models/db/alert.py). Server-derived from the
+    # authenticated entity, never client-supplied (§4.1). Scopes match, author
+    # and read alike; a cross-tenant id is a 404, never a 403 (§8.1).
+    tenant_id: str = Field(foreign_key="tenant.id", nullable=False)
     name: str
     # Holds a CAPP wallet_name; column kept named `namespace` for continuity (§4.4).
     namespace: str

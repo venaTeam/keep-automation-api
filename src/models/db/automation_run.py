@@ -1,6 +1,11 @@
 """`automation_runs` — one row per (attempted or suppressed) run; the audit
 trail (spec §4.4). Unique `(history_id, automation_id)` is the idempotency
 authority. Enum string values pinned in automation-contracts.md §"DB enums".
+
+Carries its own `tenant_id` (unlike `automation_revisions`): run history is a
+tenant-scoped read, and denormalizing the tenant onto the row keeps every
+history read filtered at the row it returns rather than trusting a join back to
+`automations`. Always equals the parent automation's `tenant_id`.
 """
 from datetime import datetime
 from enum import Enum
@@ -48,9 +53,16 @@ class AutomationRun(SQLModel, table=True):
     __tablename__ = "automation_runs"
     __table_args__ = (
         # The idempotency authority (§4.4): one run row per (alert event, automation).
+        # Stays tenant-less on purpose — `history_id` is already unique per alert
+        # event platform-wide, so tenant adds no discriminating power, and a
+        # three-column key would let a mis-stamped tenant open a SECOND run row
+        # for an event that already ran (automation-contracts.md §submit).
         UniqueConstraint(
             "history_id", "automation_id", name="uq_automation_runs_history_automation"
         ),
+        # Both scans are deliberately tenant-less too: `automation_id` already
+        # implies the tenant, and the reconciler's state scan is an infra repair
+        # loop that must see every tenant.
         Index("ix_automation_runs_state_created_at", "state", "created_at"),
         Index(
             "ix_automation_runs_automation_id_created_at",
@@ -63,6 +75,8 @@ class AutomationRun(SQLModel, table=True):
     automation_id: UUID = Field(
         sa_column=Column(ForeignKey("automations.id"), nullable=False)
     )
+    # Denormalized from the parent automation; see the module docstring.
+    tenant_id: str = Field(foreign_key="tenant.id", nullable=False)
     history_id: str
     fingerprint: str
     payload: dict = Field(sa_column=Column(JSONB, nullable=False))

@@ -1,6 +1,11 @@
 """`automation_revisions` — human-attributed change log (spec §4.4): one row
 per definition-affecting action, since git commits are made by the single
 backend identity. Enum values pinned in automation-contracts.md §"DB enums".
+
+**No `tenant_id` here, deliberately** (unlike `automation_runs`): a revision is
+only ever reached through its parent automation, so `automation_id` →
+`automations.tenant_id` already scopes every read. A denormalized copy would be
+a second value to keep true for no query it enables (spec §4.4).
 """
 from datetime import datetime
 from enum import Enum
