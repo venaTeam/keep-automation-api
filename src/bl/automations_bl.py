@@ -3,6 +3,14 @@
 Synchronous by design — routes run these via `run_in_threadpool` (the pinned
 blocking-I/O pattern, see src/bl/ssrf.py).
 
+**Tenant scoping (spec §8.1).** `tenant_id` leads every signature here because
+it is not optional context: create stamps it, list/get/update filter on it, and
+an id belonging to another tenant must read as *absent* — `AutomationNotFoundError`
+→ 404, never a 403, so existence never leaks across tenants. It is always
+server-derived from the authenticated entity; `AutomationIn` deliberately has no
+`tenant_id` field (§4.1), so a client cannot supply one. Note that a primary-key
+`session.get()` cannot express this filter — hence the explicit selects below.
+
 Transactional shape (create and update): the `automations` row and its
 `automation_revisions` row are written in ONE session; the git commit happens
 inside that transaction (after flush, before commit) so a git failure rolls
@@ -40,12 +48,32 @@ def _validated(data: AutomationIn) -> None:
         raise AutomationValidationError(errors)
 
 
-def create_automation(data: AutomationIn, actor: str, git: GitClient) -> Automation:
+def _scoped_get(session, tenant_id: str, automation_id: UUID) -> Automation:
+    """Fetch one automation *within* a tenant, or raise not-found.
+
+    Never `session.get(Automation, automation_id)`: a bare primary-key lookup
+    cannot carry the tenant predicate, so it would return another tenant's row.
+    """
+    automation = session.scalars(
+        select(Automation).where(
+            Automation.id == automation_id,
+            Automation.tenant_id == tenant_id,
+        )
+    ).first()
+    if automation is None:
+        raise AutomationNotFoundError()
+    return automation
+
+
+def create_automation(
+    tenant_id: str, data: AutomationIn, actor: str, git: GitClient
+) -> Automation:
     _validated(data)
     automation_id = uuid4()
     script_path = f"{automation_id}/script.py"
     automation = Automation(
         id=automation_id,
+        tenant_id=tenant_id,
         name=data.name,
         namespace=data.namespace,
         triggers=data.triggers,
@@ -82,12 +110,14 @@ def create_automation(data: AutomationIn, actor: str, git: GitClient) -> Automat
 
 
 def update_automation(
-    automation_id: UUID, data: AutomationIn, actor: str, git: GitClient
+    tenant_id: str,
+    automation_id: UUID,
+    data: AutomationIn,
+    actor: str,
+    git: GitClient,
 ) -> Automation:
     with get_session() as session:
-        automation = session.get(Automation, automation_id)
-        if automation is None:
-            raise AutomationNotFoundError()
+        automation = _scoped_get(session, tenant_id, automation_id)
         if automation.build_state == BuildState.BUILDING:
             raise AutomationBuildingError()
         _validated(data)
@@ -123,22 +153,23 @@ def update_automation(
     return automation
 
 
-def get_automation(automation_id: UUID, git: GitClient) -> tuple[Automation, str | None]:
+def get_automation(
+    tenant_id: str, automation_id: UUID, git: GitClient
+) -> tuple[Automation, str | None]:
     with get_session() as session:
-        automation = session.get(Automation, automation_id)
-        if automation is None:
-            raise AutomationNotFoundError()
+        automation = _scoped_get(session, tenant_id, automation_id)
         session.expunge(automation)
     script = git.read_script(automation.script_path)
     return automation, script
 
 
 def list_automations(
+    tenant_id: str,
     namespace: str | None = None,
     matching_state: MatchingState | None = None,
     build_state: BuildState | None = None,
 ) -> list[Automation]:
-    query = select(Automation)
+    query = select(Automation).where(Automation.tenant_id == tenant_id)
     if namespace is not None:
         query = query.where(Automation.namespace == namespace)
     if matching_state is not None:

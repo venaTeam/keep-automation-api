@@ -16,7 +16,13 @@ def get_git_client() -> GitClient:
 
 
 async def get_authenticated_entity() -> dict:
-    """User-tier identity. Noauth shim returns a static entity for now."""
+    """User-tier identity. Noauth shim returns a static entity for now.
+
+    `tenant_id` here is the ONLY source of tenant scope for the user tier — the
+    BL takes it as an explicit argument and no request body may supply it
+    (spec §4.1/§8.1). When the shared identity manager replaces this shim it
+    must keep returning the same two keys.
+    """
     return {"tenant_id": "keep", "email": "noauth@keep"}
 
 

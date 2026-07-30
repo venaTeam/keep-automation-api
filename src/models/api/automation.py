@@ -16,7 +16,13 @@ from src.models.db.automation import BuildState, MatchingState
 
 
 class AutomationIn(BaseModel):
-    """Create/edit payload (spec §4.1)."""
+    """Create/edit payload (spec §4.1).
+
+    Carries **no `tenant_id`** on purpose — the tenant is server-derived from the
+    authenticated entity and stamped in the BL. Pydantic v1 ignores unknown keys
+    by default, so a `tenant_id` in the request body is silently dropped rather
+    than honoured; that is the intended behaviour, not an oversight.
+    """
 
     name: str
     namespace: str

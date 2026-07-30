@@ -8,6 +8,12 @@ domain exceptions to HTTP:
   error list (automation-contracts.md §Validation errors)
 - AutomationNotFoundError   -> 404
 - AutomationBuildingError   -> 409 (mid-build submission lock, spec §8.1)
+
+Every route passes `entity["tenant_id"]` into the BL: the caller's tenant comes
+from the session, never from the request body (spec §4.1/§8.1). An id owned by
+another tenant surfaces as AutomationNotFoundError -> 404, so the 404 branch is
+doing double duty — unknown id and cross-tenant id are indistinguishable by
+design.
 """
 from uuid import UUID
 
@@ -48,9 +54,14 @@ async def list_automations(
     namespace: str | None = None,
     matching_state: MatchingState | None = None,
     build_state: BuildState | None = None,
+    entity: dict = Depends(get_authenticated_entity),
 ):
     automations = await run_in_threadpool(
-        automations_bl.list_automations, namespace, matching_state, build_state
+        automations_bl.list_automations,
+        entity["tenant_id"],
+        namespace,
+        matching_state,
+        build_state,
     )
     return {
         "automations": [AutomationListItem.from_orm(a).dict() for a in automations]
@@ -65,7 +76,11 @@ async def create_automation(
 ):
     try:
         automation = await run_in_threadpool(
-            automations_bl.create_automation, data, entity["email"], git
+            automations_bl.create_automation,
+            entity["tenant_id"],
+            data,
+            entity["email"],
+            git,
         )
     except AutomationValidationError as exc:
         return _validation_error_response(exc)
@@ -75,11 +90,12 @@ async def create_automation(
 @router.get("/automations/{automation_id}")
 async def get_automation(
     automation_id: UUID,
+    entity: dict = Depends(get_authenticated_entity),
     git: GitClient = Depends(get_git_client),
 ):
     try:
         automation, script = await run_in_threadpool(
-            automations_bl.get_automation, automation_id, git
+            automations_bl.get_automation, entity["tenant_id"], automation_id, git
         )
     except AutomationNotFoundError:
         return JSONResponse(status_code=404, content={"detail": "Automation not found"})
@@ -95,7 +111,12 @@ async def update_automation(
 ):
     try:
         automation = await run_in_threadpool(
-            automations_bl.update_automation, automation_id, data, entity["email"], git
+            automations_bl.update_automation,
+            entity["tenant_id"],
+            automation_id,
+            data,
+            entity["email"],
+            git,
         )
     except AutomationValidationError as exc:
         return _validation_error_response(exc)
