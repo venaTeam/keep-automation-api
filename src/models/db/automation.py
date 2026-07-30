@@ -44,8 +44,12 @@ class Automation(SQLModel, table=True):
     __table_args__ = (
         # Hydration index (§4.4). `matching_state` LEADS on purpose: the matcher
         # hydrates every tenant in one `WHERE matching_state = 'active'` pass per
-        # reload, so a tenant-leading index could not serve it; `tenant_id` rides
-        # second to keep that read covering.
+        # reload, so a tenant-leading index could not serve it. `tenant_id` rides
+        # second for grouped output and to allow a single-tenant reload to seek
+        # rather than filter — NOT to make the read covering. It cannot be
+        # covering: hydration also reads `triggers`, `cooldown_fields`,
+        # `cooldown_seconds` and `grace_seconds`, so every matched row is a heap
+        # fetch regardless.
         # Names must match the keep-api-gateway revision that actually creates
         # these indexes (`create_automation_tables`) — that migration is the DB
         # truth; this declaration only builds the test schema.
