@@ -17,9 +17,12 @@ from src.contracts import (
     MATCHABLE_FIELDS,
     MATCHABLE_OPTIONAL,
     MATCHABLE_REQUIRED,
+    COOLDOWN_FIELDS_MAX,
     SCRIPT_MAX_BYTES,
     TIMEOUT_SECONDS_DEFAULT,
     TIMEOUT_SECONDS_MAX,
+    TRIGGER_VALUE_MAX_BYTES,
+    TRIGGERS_MAX,
     TRIGGERS_MIN,
 )
 
@@ -53,6 +56,9 @@ def test_numeric_limits_recorded_in_contracts_doc():
     limits_section = doc.split("**Numeric limits**", 1)[1]
     for constant, value in [
         ("TRIGGERS_MIN", TRIGGERS_MIN),
+        ("TRIGGERS_MAX", TRIGGERS_MAX),
+        ("TRIGGER_VALUE_MAX_BYTES", TRIGGER_VALUE_MAX_BYTES),
+        ("COOLDOWN_FIELDS_MAX", COOLDOWN_FIELDS_MAX),
         ("COOLDOWN_SECONDS_MAX", COOLDOWN_SECONDS_MAX),
         ("TIMEOUT_SECONDS_MAX", TIMEOUT_SECONDS_MAX),
         ("TIMEOUT_SECONDS_DEFAULT", TIMEOUT_SECONDS_DEFAULT),

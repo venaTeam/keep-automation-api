@@ -12,6 +12,7 @@ from src.contracts.field_allowlist import (
     MATCHABLE_REQUIRED,
 )
 from src.contracts.limits import (
+    COOLDOWN_FIELDS_MAX,
     COOLDOWN_SECONDS_MAX,
     GRACE_SECONDS_DEFAULT,
     GRACE_SECONDS_MAX,
@@ -19,6 +20,8 @@ from src.contracts.limits import (
     SCRIPT_MAX_BYTES,
     TIMEOUT_SECONDS_DEFAULT,
     TIMEOUT_SECONDS_MAX,
+    TRIGGER_VALUE_MAX_BYTES,
+    TRIGGERS_MAX,
     TRIGGERS_MIN,
 )
 from src.contracts.validation_errors import (
@@ -34,6 +37,7 @@ __all__ = [
     "MATCHABLE_FIELDS",
     "MATCHABLE_OPTIONAL",
     "MATCHABLE_REQUIRED",
+    "COOLDOWN_FIELDS_MAX",
     "COOLDOWN_SECONDS_MAX",
     "GRACE_SECONDS_DEFAULT",
     "GRACE_SECONDS_MAX",
@@ -41,5 +45,7 @@ __all__ = [
     "SCRIPT_MAX_BYTES",
     "TIMEOUT_SECONDS_DEFAULT",
     "TIMEOUT_SECONDS_MAX",
+    "TRIGGER_VALUE_MAX_BYTES",
+    "TRIGGERS_MAX",
     "TRIGGERS_MIN",
 ]
