@@ -14,10 +14,11 @@ from uuid import UUID, uuid4
 from sqlalchemy import (
     Column,
     DateTime,
-    ForeignKey,
+    ForeignKeyConstraint,
     Index,
     SmallInteger,
     UniqueConstraint,
+    Uuid,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -60,21 +61,40 @@ class AutomationRun(SQLModel, table=True):
         UniqueConstraint(
             "history_id", "automation_id", name="uq_automation_runs_history_automation"
         ),
+        # (automation_id, tenant_id) must exist AS A PAIR on `automations` —
+        # this is what forces the denormalized `tenant_id` to actually equal
+        # the parent automation's; a mis-stamped audit row is unwritable.
+        ForeignKeyConstraint(
+            ["automation_id", "tenant_id"],
+            ["automations.id", "automations.tenant_id"],
+            name="fk_automation_runs_automation_tenant",
+        ),
         # Both scans are deliberately tenant-less too: `automation_id` already
         # implies the tenant, and the reconciler's state scan is an infra repair
-        # loop that must see every tenant.
-        Index("ix_automation_runs_state_created_at", "state", "created_at"),
+        # loop that must see every tenant. Partial: the reconciler only reads
+        # non-terminal states, and at steady state ~99% of rows are terminal.
+        Index(
+            "ix_automation_runs_state_created_at",
+            "state",
+            "created_at",
+            postgresql_where=text("state IN ('pending', 'submitted')"),
+        ),
         Index(
             "ix_automation_runs_automation_id_created_at",
             "automation_id",
             "created_at",
         ),
+        # Tenant-scoped run listing / audit view.
+        Index(
+            "ix_automation_runs_tenant_id_created_at",
+            "tenant_id",
+            "created_at",
+        ),
     )
 
     run_id: UUID = Field(default_factory=uuid4, primary_key=True)
-    automation_id: UUID = Field(
-        sa_column=Column(ForeignKey("automations.id"), nullable=False)
-    )
+    # Referential integrity via the composite FK above, not an inline one.
+    automation_id: UUID = Field(sa_column=Column(Uuid(), nullable=False))
     # Denormalized from the parent automation; see the module docstring.
     tenant_id: str = Field(foreign_key="tenant.id", nullable=False)
     history_id: str

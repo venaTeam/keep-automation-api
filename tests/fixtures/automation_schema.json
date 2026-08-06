@@ -221,10 +221,12 @@
       "foreign_keys": [
         {
           "constrained_columns": [
-            "automation_id"
+            "automation_id",
+            "tenant_id"
           ],
           "referred_columns": [
-            "id"
+            "id",
+            "tenant_id"
           ],
           "referred_table": "automations"
         },
@@ -253,6 +255,14 @@
             "created_at"
           ],
           "name": "ix_automation_runs_state_created_at",
+          "unique": false
+        },
+        {
+          "columns": [
+            "tenant_id",
+            "created_at"
+          ],
+          "name": "ix_automation_runs_tenant_id_created_at",
           "unique": false
         }
       ],
@@ -487,7 +497,15 @@
       "primary_key": [
         "id"
       ],
-      "unique_constraints": []
+      "unique_constraints": [
+        {
+          "columns": [
+            "id",
+            "tenant_id"
+          ],
+          "name": "uq_automations_id_tenant_id"
+        }
+      ]
     }
   }
 }

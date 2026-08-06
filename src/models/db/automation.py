@@ -19,7 +19,15 @@ from datetime import datetime
 from enum import Enum
 from uuid import UUID, uuid4
 
-from sqlalchemy import BigInteger, Column, DateTime, Index, SmallInteger, text
+from sqlalchemy import (
+    BigInteger,
+    Column,
+    DateTime,
+    Index,
+    SmallInteger,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
 
@@ -58,6 +66,10 @@ class Automation(SQLModel, table=True):
         Index("ix_automations_build_state_lock", "build_state", "build_lock_deadline"),
         Index("ix_automations_tenant_id_namespace", "tenant_id", "namespace"),
         Index("ix_automations_tenant_id_created_at", "tenant_id", "created_at"),
+        # Redundant with the PK as a uniqueness rule — exists solely as the
+        # target of `automation_runs`' composite FK, which makes a run row
+        # whose `tenant_id` disagrees with its automation's unwritable.
+        UniqueConstraint("id", "tenant_id", name="uq_automations_id_tenant_id"),
     )
 
     id: UUID = Field(default_factory=uuid4, primary_key=True)
