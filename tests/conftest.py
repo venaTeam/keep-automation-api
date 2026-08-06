@@ -102,6 +102,20 @@ def database_url(request) -> str:
 @pytest.fixture(scope="session")
 def test_engine(database_url):
     engine = create_engine(database_url)
+    # Refuse a real platform database. The autouse `clean_tables` fixture runs
+    # unconditional DELETEs against the automation tables, and the test DSN is
+    # deliberately copy-paste compatible with the platform's — so a mis-set
+    # TEST_DATABASE_URL would wipe the live control plane and its audit
+    # history. `alert` is gateway-owned: present in every real `keep` database,
+    # never in a disposable test one.
+    with engine.connect() as conn:
+        if conn.execute(text("SELECT to_regclass('public.alert')")).scalar():
+            pytest.fail(
+                "Refusing to run: this database contains the platform table "
+                "'alert', so it is a real 'keep' database, not a disposable "
+                "test one. Fix TEST_DATABASE_URL — the fixtures DELETE FROM "
+                "the automation tables before every test."
+            )
     SQLModel.metadata.create_all(engine)
     with engine.begin() as conn:
         for tenant_id in SEEDED_TENANTS:
