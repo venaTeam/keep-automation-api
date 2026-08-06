@@ -116,11 +116,16 @@ def update_automation(
     actor: str,
     git: GitClient,
 ) -> Automation:
+    # Validate BEFORE opening the session: ssrf.validate_logstash_url can block
+    # up to 3s on DNS, and holding one of the few pooled connections across it
+    # exhausts the pool under concurrent PUTs (rules/automation-api.md pins
+    # `create`'s shape as the reference). The build-state 409 stays inside the
+    # session; a wasted validation on that path costs nothing.
+    _validated(data)
     with get_session() as session:
         automation = _scoped_get(session, tenant_id, automation_id)
         if automation.build_state == BuildState.BUILDING:
             raise AutomationBuildingError()
-        _validated(data)
 
         automation.name = data.name
         automation.namespace = data.namespace

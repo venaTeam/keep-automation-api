@@ -32,9 +32,15 @@ def get_engine() -> Engine:
             pool_size=config.DB_POOL_SIZE,
             max_overflow=config.DB_MAX_OVERFLOW,
             pool_timeout=config.DB_POOL_TIMEOUT,
-            # Bounds the TCP/auth handshake. Without it a black-holed host hangs
-            # until the OS gives up, which is far longer than any probe budget.
-            connect_args={"connect_timeout": config.DB_CONNECT_TIMEOUT},
+            connect_args={
+                # Bounds the TCP/auth handshake. Without it a black-holed host
+                # hangs until the OS gives up, far longer than any probe budget.
+                "connect_timeout": config.DB_CONNECT_TIMEOUT,
+                # Per-statement ceiling on every query this engine runs — a
+                # lock-hung query must not pin one of the few pooled
+                # connections. See src/config.py for the rationale.
+                "options": f"-c statement_timeout={config.DB_STATEMENT_TIMEOUT_MS}",
+            },
         )
     return _engine
 

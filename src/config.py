@@ -63,6 +63,16 @@ DATABASE_URL, DATABASE_URL_SOURCE = resolve_database_url(os.environ)
 # Bounds on the readiness probe's `SELECT 1` so a slow or black-holed database
 # cannot turn the health endpoint into a hung request.
 DB_CONNECT_TIMEOUT = int(os.environ.get("DATABASE_CONNECT_TIMEOUT", "3"))
+
+# Hard per-statement ceiling on the application engine. One query hung on a
+# lock (a gateway Alembic DDL on the shared `keep` database is the concrete
+# case) must not pin a pooled connection indefinitely — with a 3+3 pool per
+# worker that is a whole-service outage, and readiness shares the pool so it
+# flaps with it. Applied per-connection via libpq options; `SET LOCAL` in a
+# transaction (the healthcheck) still overrides it within that transaction.
+DB_STATEMENT_TIMEOUT_MS = int(
+    os.environ.get("DATABASE_STATEMENT_TIMEOUT_MS", "5000")
+)
 DB_HEALTHCHECK_TIMEOUT_MS = int(
     os.environ.get("DATABASE_HEALTHCHECK_TIMEOUT_MS", "2000")
 )
