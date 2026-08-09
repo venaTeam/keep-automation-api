@@ -7,7 +7,7 @@ from src.api.deps import get_authenticated_entity
 router = APIRouter(dependencies=[Depends(get_authenticated_entity)])
 
 
-@router.get("/events")
+@router.get("/events", status_code=200)
 async def events():
     async def event_stream():
         # Skeleton: emit a single SSE keep-alive comment, then close.

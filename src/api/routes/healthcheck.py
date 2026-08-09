@@ -29,12 +29,14 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-@router.get("/")
+@router.get("/", status_code=200)
 async def root():
     return {"service": "keep-automation-api", "version": config.KEEP_VERSION}
 
 
-@router.get("/healthcheck")
+# 200 is the declared (ready) code; the unready branch below returns an explicit
+# 503 JSONResponse, which overrides it.
+@router.get("/healthcheck", status_code=200)
 async def healthcheck():
     """Readiness: is this pod able to serve a request right now?"""
     try:
@@ -53,7 +55,7 @@ async def healthcheck():
     return {"status": "ok", "database": "ok"}
 
 
-@router.get("/livez")
+@router.get("/livez", status_code=200)
 async def livez():
     """Liveness: is the process itself up? Deliberately no database call."""
     return {"status": "ok"}

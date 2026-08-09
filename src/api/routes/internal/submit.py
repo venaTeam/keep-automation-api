@@ -15,6 +15,6 @@ from src.api.deps import verify_service_token
 router = APIRouter(dependencies=[Depends(verify_service_token)])
 
 
-@router.post("/internal/submit")
+@router.post("/internal/submit", status_code=200)
 async def submit():
     return {"status": "ok"}

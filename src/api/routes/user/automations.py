@@ -1,8 +1,10 @@
 """User-tier authoring routes (D13): CRUD + alert-schema fields.
 
 Thin layer: parse input, run the sync BL in the threadpool (blocking DNS/DB/git
-I/O never touches the event loop — pattern pinned in src/bl/ssrf.py), map
-domain exceptions to HTTP:
+I/O never touches the event loop — pattern pinned in src/bl/ssrf.py), return the
+result. Domain exceptions are NOT caught here — `src/main.py` registers one
+handler per exception, so the status and body for a failure live in a single
+place and a new route cannot forget a branch:
 
 - AutomationValidationError -> 400 with the accumulating machine-readable
   error list (automation-contracts.md §Validation errors)
@@ -19,28 +21,15 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import JSONResponse
 
 from src.api.deps import get_authenticated_entity, get_git_client
 from src.bl import automations_bl
 from src.bl.git_client import GitClient
 from src.contracts.field_allowlist import MATCHABLE_OPTIONAL, MATCHABLE_REQUIRED
-from src.exceptions import (
-    AutomationBuildingError,
-    AutomationNotFoundError,
-    AutomationValidationError,
-)
 from src.models.api.automation import AutomationIn, AutomationListItem, AutomationOut
 from src.models.db.automation import Automation, BuildState, MatchingState
 
 router = APIRouter(dependencies=[Depends(get_authenticated_entity)])
-
-
-def _validation_error_response(exc: AutomationValidationError) -> JSONResponse:
-    return JSONResponse(
-        status_code=400,
-        content={"errors": [e.dict() for e in exc.errors]},
-    )
 
 
 def _detail(automation: Automation, script: str | None) -> dict:
@@ -49,7 +38,7 @@ def _detail(automation: Automation, script: str | None) -> dict:
     return out.dict()
 
 
-@router.get("/automations")
+@router.get("/automations", status_code=200)
 async def list_automations(
     namespace: str | None = None,
     matching_state: MatchingState | None = None,
@@ -74,69 +63,53 @@ async def create_automation(
     entity: dict = Depends(get_authenticated_entity),
     git: GitClient = Depends(get_git_client),
 ):
-    try:
-        automation = await run_in_threadpool(
-            automations_bl.create_automation,
-            entity["tenant_id"],
-            data,
-            entity["email"],
-            git,
-        )
-    except AutomationValidationError as exc:
-        return _validation_error_response(exc)
+    automation = await run_in_threadpool(
+        automations_bl.create_automation,
+        entity["tenant_id"],
+        data,
+        entity["email"],
+        git,
+    )
     return _detail(automation, data.script)
 
 
-@router.get("/automations/{automation_id}")
+@router.get("/automations/{automation_id}", status_code=200)
 async def get_automation(
     automation_id: UUID,
     entity: dict = Depends(get_authenticated_entity),
     git: GitClient = Depends(get_git_client),
 ):
-    try:
-        automation, script = await run_in_threadpool(
-            automations_bl.get_automation, entity["tenant_id"], automation_id, git
-        )
-    except AutomationNotFoundError:
-        return JSONResponse(status_code=404, content={"detail": "Automation not found"})
+    automation, script = await run_in_threadpool(
+        automations_bl.get_automation, entity["tenant_id"], automation_id, git
+    )
     return _detail(automation, script)
 
 
-@router.put("/automations/{automation_id}")
+@router.put("/automations/{automation_id}", status_code=200)
 async def update_automation(
     automation_id: UUID,
     data: AutomationIn,
     entity: dict = Depends(get_authenticated_entity),
     git: GitClient = Depends(get_git_client),
 ):
-    try:
-        automation = await run_in_threadpool(
-            automations_bl.update_automation,
-            entity["tenant_id"],
-            automation_id,
-            data,
-            entity["email"],
-            git,
-        )
-    except AutomationValidationError as exc:
-        return _validation_error_response(exc)
-    except AutomationNotFoundError:
-        return JSONResponse(status_code=404, content={"detail": "Automation not found"})
-    except AutomationBuildingError:
-        return JSONResponse(
-            status_code=409,
-            content={"detail": "Automation is mid-build; retry after the build completes"},
-        )
+    automation = await run_in_threadpool(
+        automations_bl.update_automation,
+        entity["tenant_id"],
+        automation_id,
+        data,
+        entity["email"],
+        git,
+    )
     return _detail(automation, data.script)
 
 
-@router.get("/namespaces")
+@router.get("/namespaces", status_code=200)
 async def list_namespaces():
     # Stub until F25 (wallet onboarding) — see src/bl/namespaces.py.
     return {"namespaces": []}
 
 
-@router.get("/alert-schema/fields")
+@router.get("/alert-schema/fields", status_code=200)
 async def alert_schema_fields():
     """Allowlist for trigger/cooldown dropdowns (G28 renders from this, never hardcodes)."""
     return {
