@@ -8,6 +8,7 @@
 from fastapi import Header
 
 from src.bl.git_client import GitClient, get_default_git_client
+from src.models.api.identity import AuthenticatedEntity
 
 
 def get_git_client() -> GitClient:
@@ -15,15 +16,16 @@ def get_git_client() -> GitClient:
     return get_default_git_client()
 
 
-async def get_authenticated_entity() -> dict:
+async def get_authenticated_entity() -> AuthenticatedEntity:
     """User-tier identity. Noauth shim returns a static entity for now.
 
     `tenant_id` here is the ONLY source of tenant scope for the user tier — the
     BL takes it as an explicit argument and no request body may supply it
     (spec §4.1/§8.1). When the shared identity manager replaces this shim it
-    must keep returning the same two keys.
+    must keep returning an AuthenticatedEntity, which is what the routes and
+    every tenant-scoped query downstream are typed against.
     """
-    return {"tenant_id": "keep", "email": "noauth@keep"}
+    return AuthenticatedEntity(tenant_id="keep", email="noauth@keep")
 
 
 async def verify_ci_webhook_token(x_gitlab_token: str | None = Header(default=None)):

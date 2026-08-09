@@ -46,6 +46,7 @@ from sqlmodel import SQLModel
 import src.core.db as db_core
 import src.models.db  # noqa: F401  registers the automation tables on the metadata
 from src.api.deps import get_authenticated_entity
+from src.models.api.identity import AuthenticatedEntity
 from src.main import get_app
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -166,10 +167,13 @@ def client_as(test_engine):
 
         def _make(tenant_id: str) -> TestClient:
             app = get_app()
-            app.dependency_overrides[get_authenticated_entity] = lambda: {
-                "tenant_id": tenant_id,
-                "email": f"author@{tenant_id}",
-            }
+            # Returns the same type the real dependency does, so an override
+            # cannot drift into a shape the routes no longer accept.
+            app.dependency_overrides[get_authenticated_entity] = (
+                lambda: AuthenticatedEntity(
+                    tenant_id=tenant_id, email=f"author@{tenant_id}"
+                )
+            )
             return stack.enter_context(TestClient(app))
 
         yield _make
