@@ -7,6 +7,13 @@
 """
 from fastapi import Header
 
+from src.bl.git_client import GitClient, get_default_git_client
+
+
+def get_git_client() -> GitClient:
+    """Script-repo client. In-memory stub until D14 lands the GitLab client."""
+    return get_default_git_client()
+
 
 async def get_authenticated_entity() -> dict:
     """User-tier identity. Noauth shim returns a static entity for now."""

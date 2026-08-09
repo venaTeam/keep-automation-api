@@ -7,8 +7,10 @@ import logging
 from contextlib import asynccontextmanager
 
 from dotenv import find_dotenv, load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from src import config
 
@@ -39,6 +41,29 @@ def get_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @app.exception_handler(RequestValidationError)
+    async def request_validation_handler(
+        request: Request, exc: RequestValidationError
+    ) -> JSONResponse:
+        # Body/type failures use the same machine-readable 400 shape as the
+        # domain validators (automation-contracts.md §Validation errors).
+        errors = []
+        for pydantic_error in exc.errors():
+            location = [str(part) for part in pydantic_error["loc"] if part != "body"]
+            code = (
+                "field_required"
+                if pydantic_error["type"].endswith("missing")
+                else "invalid_value"
+            )
+            errors.append(
+                {
+                    "field": ".".join(location) or "body",
+                    "code": code,
+                    "message": pydantic_error["msg"],
+                }
+            )
+        return JSONResponse(status_code=400, content={"errors": errors})
 
     # Health / root
     from src.api.routes.healthcheck import router as healthcheck_router

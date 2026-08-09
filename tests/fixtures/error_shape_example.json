@@ -1,0 +1,14 @@
+{
+  "errors": [
+    {
+      "field": "triggers[1].field",
+      "code": "unknown_field",
+      "message": "Field 'message' is not matchable; choose one of the allowlisted alert fields."
+    },
+    {
+      "field": "cooldown_fields",
+      "code": "cooldown_fields_required",
+      "message": "cooldown_fields is required when cooldown_seconds is set (empty list = whole-automation cooldown)."
+    }
+  ]
+}
