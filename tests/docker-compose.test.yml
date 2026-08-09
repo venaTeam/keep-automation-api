@@ -2,8 +2,14 @@ services:
   postgres-test:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: automations_test
+      # The shared platform database — the automation tables live in `keep`,
+      # not in a private `automations` database (spec §4.4). Same name and
+      # credentials the gateway / event-handler use, so a DSN copied from
+      # anywhere on the platform works here.
+      POSTGRES_USER: keep
+      POSTGRES_PASSWORD: keep
+      POSTGRES_DB: keep
     ports:
+      # Deliberately not 5432: this disposable container must never collide with
+      # a real local keepHQ stack.
       - "5443:5432"

@@ -6,6 +6,7 @@ from uuid import uuid4
 from sqlalchemy import text
 
 from src.contracts.field_allowlist import MATCHABLE_OPTIONAL, MATCHABLE_REQUIRED
+from tests.conftest import OTHER_TENANT, TENANT
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -136,6 +137,70 @@ def test_put_invalid_payload_returns_accumulating_400(client, test_engine):
     assert resp.status_code == 400
     codes = {e["code"] for e in resp.json()["errors"]}
     assert {"triggers_too_few", "unknown_field"} <= codes
+
+
+# --- tenant isolation ---------------------------------------------------
+
+
+def test_create_stamps_the_session_tenant_not_the_body(client_as, test_engine):
+    """A `tenant_id` in the body is ignored — the session's tenant is stamped."""
+    resp = client_as(TENANT).post(
+        "/automations", json={**VALID, "tenant_id": OTHER_TENANT}
+    )
+    assert resp.status_code == 201
+    with test_engine.connect() as conn:
+        stored = conn.execute(
+            text("SELECT tenant_id FROM automations WHERE id = :id"),
+            {"id": resp.json()["id"]},
+        ).scalar()
+    assert stored == TENANT
+
+
+def test_list_does_not_leak_across_tenants(client_as):
+    mine = client_as(TENANT)
+    theirs = client_as(OTHER_TENANT)
+    mine.post("/automations", json=VALID)
+    theirs.post("/automations", json={**VALID, "name": "theirs"})
+
+    assert [a["name"] for a in mine.get("/automations").json()["automations"]] == [
+        VALID["name"]
+    ]
+    assert [a["name"] for a in theirs.get("/automations").json()["automations"]] == [
+        "theirs"
+    ]
+
+
+def test_get_of_another_tenants_id_is_404_not_403(client_as):
+    theirs = client_as(OTHER_TENANT).post("/automations", json=VALID).json()
+    resp = client_as(TENANT).get(f"/automations/{theirs['id']}")
+    assert resp.status_code == 404
+    # Indistinguishable from a never-existing id: no existence leak (§8.1).
+    unknown = client_as(TENANT).get(f"/automations/{uuid4()}")
+    assert resp.json() == unknown.json()
+
+
+def test_put_of_another_tenants_id_is_404_not_409(client_as, test_engine):
+    """Even mid-build — a 409 would confirm the row exists."""
+    theirs = client_as(OTHER_TENANT).post("/automations", json=VALID).json()
+    assert theirs["build_state"] == "building"
+    assert (
+        client_as(TENANT).put(f"/automations/{theirs['id']}", json=VALID).status_code
+        == 404
+    )
+
+    with test_engine.begin() as conn:
+        conn.execute(text("UPDATE automations SET build_state = 'idle'"))
+    assert (
+        client_as(TENANT).put(f"/automations/{theirs['id']}", json=VALID).status_code
+        == 404
+    )
+    # The owner can still edit it — the 404s above were the tenant predicate.
+    assert (
+        client_as(OTHER_TENANT)
+        .put(f"/automations/{theirs['id']}", json={**VALID, "name": "renamed"})
+        .status_code
+        == 200
+    )
 
 
 # --- alert schema -------------------------------------------------------

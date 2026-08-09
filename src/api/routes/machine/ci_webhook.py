@@ -9,6 +9,6 @@ from src.api.deps import verify_ci_webhook_token
 router = APIRouter()
 
 
-@router.post("/internal/ci-webhook")
+@router.post("/internal/ci-webhook", status_code=200)
 async def ci_webhook(_token: str | None = Depends(verify_ci_webhook_token)):
     return {"status": "accepted"}

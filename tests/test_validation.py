@@ -6,11 +6,14 @@ from src.bl.validation import (
     validate_timeout,
     validate_triggers,
 )
+from src.contracts.field_allowlist import MATCHABLE_FIELDS
 from src.contracts.limits import (
     COOLDOWN_SECONDS_MAX,
     GRACE_SECONDS_MAX,
     GRACE_SECONDS_MIN,
     TIMEOUT_SECONDS_MAX,
+    TRIGGER_VALUE_MAX_BYTES,
+    TRIGGERS_MAX,
 )
 from src.contracts.validation_errors import ErrorCode
 from src.models.api.automation import AutomationIn
@@ -53,6 +56,58 @@ def test_operator_shape_rejected():
 def test_non_string_value_rejected():
     triggers = TWO_TRIGGERS + [{"field": "site", "value": 42}]
     assert ErrorCode.INVALID_TRIGGER_SHAPE.value in codes(validate_triggers(triggers))
+
+
+# --- input bounding (anti-amplification) --------------------------------
+
+def test_one_trigger_per_matchable_field_passes():
+    triggers = [{"field": f, "value": "x"} for f in sorted(MATCHABLE_FIELDS)]
+    assert validate_triggers(triggers) == []
+
+def test_over_max_triggers_yield_exactly_one_error():
+    triggers = [{"field": "severity", "value": "x"}] * (TRIGGERS_MAX + 1)
+    errors = validate_triggers(triggers)
+    assert codes(errors) == [ErrorCode.TRIGGERS_TOO_MANY.value]
+
+def test_huge_trigger_list_cannot_amplify_the_error_response():
+    # Regression: 200k malformed entries used to produce ~200k FieldErrors —
+    # a small request amplified into a huge 400 (worker memory/CPU DoS).
+    triggers = [{"field": "nope", "value": "x"}] * 200_000
+    errors = validate_triggers(triggers)
+    assert len(errors) == 1
+    assert errors[0].code == ErrorCode.TRIGGERS_TOO_MANY.value
+
+def test_trigger_value_at_byte_cap_ok():
+    triggers = [
+        {"field": "severity", "value": "a" * TRIGGER_VALUE_MAX_BYTES},
+        {"field": "application", "value": "payments"},
+    ]
+    assert validate_triggers(triggers) == []
+
+def test_trigger_value_over_byte_cap_rejected_with_path():
+    triggers = [
+        {"field": "severity", "value": "a" * (TRIGGER_VALUE_MAX_BYTES + 1)},
+        {"field": "application", "value": "payments"},
+    ]
+    errors = validate_triggers(triggers)
+    assert codes(errors) == [ErrorCode.TRIGGER_VALUE_TOO_LONG.value]
+    assert errors[0].field == "triggers[0].value"
+
+def test_trigger_value_cap_counts_bytes_not_characters():
+    # "€" is 3 UTF-8 bytes; this stays under the cap in characters but not bytes.
+    over_in_bytes = "€" * (TRIGGER_VALUE_MAX_BYTES // 3 + 1)
+    triggers = [
+        {"field": "severity", "value": over_in_bytes},
+        {"field": "application", "value": "payments"},
+    ]
+    assert ErrorCode.TRIGGER_VALUE_TOO_LONG.value in codes(validate_triggers(triggers))
+
+def test_cooldown_fields_at_max_ok():
+    assert validate_cooldown(300, sorted(MATCHABLE_FIELDS)) == []
+
+def test_huge_cooldown_fields_cannot_amplify():
+    errors = validate_cooldown(300, ["nope"] * 200_000)
+    assert codes(errors) == [ErrorCode.COOLDOWN_FIELDS_TOO_MANY.value]
 
 
 # --- cooldown -----------------------------------------------------------

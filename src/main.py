@@ -13,6 +13,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from src import config
+from src.exceptions import (
+    AutomationBuildingError,
+    AutomationNotFoundError,
+    AutomationValidationError,
+)
 
 load_dotenv(find_dotenv())
 
@@ -22,6 +27,16 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting keep-automation-api (skeleton)")
+    # Announce the resolved DB target once, credentials redacted. Nothing here
+    # connects (the engine is lazy), so this line plus /healthcheck are the only
+    # ways a wrong-DSN deploy becomes visible before requests start failing.
+    from src.core import db as db_core
+
+    logger.info(
+        "Database target: %s (DSN from %s)",
+        db_core.redacted_database_url(),
+        config.DATABASE_URL_SOURCE,
+    )
     yield
     logger.info("Shutting down keep-automation-api")
 
@@ -64,6 +79,40 @@ def get_app() -> FastAPI:
                 }
             )
         return JSONResponse(status_code=400, content={"errors": errors})
+
+    # Domain exceptions are mapped once, here, rather than in per-route
+    # try/except blocks: the routes stay thin (rules/automation-api.md), a new
+    # route cannot forget a branch, and the status/body for a given failure is
+    # defined in exactly one place. The BL raises; nothing catches in between.
+    @app.exception_handler(AutomationValidationError)
+    async def automation_validation_handler(
+        request: Request, exc: AutomationValidationError
+    ) -> JSONResponse:
+        # Same accumulating shape as RequestValidationError above — the UI keys
+        # off `code`, so both paths must be indistinguishable to it.
+        return JSONResponse(
+            status_code=400,
+            content={"errors": [e.dict() for e in exc.errors]},
+        )
+
+    @app.exception_handler(AutomationNotFoundError)
+    async def automation_not_found_handler(
+        request: Request, exc: AutomationNotFoundError
+    ) -> JSONResponse:
+        # Also the cross-tenant answer: an id owned by another tenant is a 404,
+        # never a 403, so existence never leaks (spec §8.1).
+        return JSONResponse(status_code=404, content={"detail": "Automation not found"})
+
+    @app.exception_handler(AutomationBuildingError)
+    async def automation_building_handler(
+        request: Request, exc: AutomationBuildingError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "detail": "Automation is mid-build; retry after the build completes"
+            },
+        )
 
     # Health / root
     from src.api.routes.healthcheck import router as healthcheck_router

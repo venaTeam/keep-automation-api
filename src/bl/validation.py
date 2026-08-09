@@ -13,10 +13,13 @@ from src.bl import ast_check, ssrf
 from src.bl.namespaces import validate_namespace
 from src.contracts.field_allowlist import MATCHABLE_FIELDS
 from src.contracts.limits import (
+    COOLDOWN_FIELDS_MAX,
     COOLDOWN_SECONDS_MAX,
     GRACE_SECONDS_MAX,
     GRACE_SECONDS_MIN,
     TIMEOUT_SECONDS_MAX,
+    TRIGGER_VALUE_MAX_BYTES,
+    TRIGGERS_MAX,
     TRIGGERS_MIN,
 )
 from src.contracts.validation_errors import ErrorCode, FieldError
@@ -24,6 +27,20 @@ from src.models.api.automation import AutomationIn
 
 
 def validate_triggers(triggers: list) -> list[FieldError]:
+    # Count cap FIRST, alone, no iteration: every rule below appends an error
+    # per entry, so an unbounded list would amplify a small request into an
+    # arbitrarily large 400 (worker memory/CPU exhaustion). More than one
+    # condition per matchable field can never be valid anyway.
+    if len(triggers) > TRIGGERS_MAX:
+        return [
+            FieldError(
+                field="triggers",
+                code=ErrorCode.TRIGGERS_TOO_MANY,
+                message=f"At most {TRIGGERS_MAX} conditions are allowed "
+                "(one per matchable field).",
+            )
+        ]
+
     errors: list[FieldError] = []
     if len(triggers) < TRIGGERS_MIN:
         errors.append(
@@ -53,6 +70,16 @@ def validate_triggers(triggers: list) -> list[FieldError]:
                 )
             )
             continue
+
+        if len(condition["value"].encode("utf-8")) > TRIGGER_VALUE_MAX_BYTES:
+            errors.append(
+                FieldError(
+                    field=f"{path}.value",
+                    code=ErrorCode.TRIGGER_VALUE_TOO_LONG,
+                    message=f"value exceeds {TRIGGER_VALUE_MAX_BYTES} UTF-8 bytes — "
+                    "the trigger index would silently drop this automation.",
+                )
+            )
 
         field_name = condition["field"]
         if field_name not in MATCHABLE_FIELDS:
@@ -110,7 +137,20 @@ def validate_cooldown(
             )
         )
 
-    for i, field_name in enumerate(cooldown_fields or []):
+    fields = cooldown_fields or []
+    # Same anti-amplification rule as validate_triggers: cap the count before
+    # the per-entry loop can emit one error per entry.
+    if len(fields) > COOLDOWN_FIELDS_MAX:
+        errors.append(
+            FieldError(
+                field="cooldown_fields",
+                code=ErrorCode.COOLDOWN_FIELDS_TOO_MANY,
+                message=f"At most {COOLDOWN_FIELDS_MAX} cooldown fields are allowed.",
+            )
+        )
+        return errors
+
+    for i, field_name in enumerate(fields):
         if not isinstance(field_name, str) or field_name not in MATCHABLE_FIELDS:
             errors.append(
                 FieldError(

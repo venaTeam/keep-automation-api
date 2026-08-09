@@ -12,9 +12,11 @@ def test_root_ok(client):
 
 
 def test_healthcheck_ok(client):
+    # Body/behaviour of both probes is covered in tests/test_healthcheck.py;
+    # this only asserts the health router is mounted.
     resp = client.get("/healthcheck")
     assert resp.status_code == 200
-    assert resp.json() == {"status": "ok"}
+    assert resp.json()["status"] == "ok"
 
 
 def test_user_tier_mounted(client):
