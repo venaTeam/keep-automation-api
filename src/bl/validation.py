@@ -11,8 +11,8 @@ Logstash SSRF and the AST contract check live in their own modules
 """
 from src.bl import ast_check, ssrf
 from src.bl.namespaces import validate_namespace
-from src.contracts.field_allowlist import MATCHABLE_FIELDS
-from src.contracts.limits import (
+from src.models.field_allowlist import MATCHABLE_FIELDS
+from src.models.validation_limits import (
     COOLDOWN_FIELDS_MAX,
     COOLDOWN_SECONDS_MAX,
     GRACE_SECONDS_MAX,
@@ -22,7 +22,7 @@ from src.contracts.limits import (
     TRIGGERS_MAX,
     TRIGGERS_MIN,
 )
-from src.contracts.validation_errors import ErrorCode, FieldError
+from src.models.api.validation_errors import ErrorCode, FieldError
 from src.models.api.automation import AutomationIn
 
 

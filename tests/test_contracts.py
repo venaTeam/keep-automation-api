@@ -1,4 +1,7 @@
-"""Drift guards: src/contracts constants vs automation-contracts.md (the source of truth).
+"""Drift guards: in-repo contract constants vs automation-contracts.md (the source of truth).
+
+There is no shared contracts package — each repo mirrors only the slice of the
+doc it uses, and these tests are what keep the mirror honest.
 
 The contracts doc lives at the keepHQ workspace root (one level above this
 repo). When run standalone (repo checked out alone, e.g. CI), the doc isn't
@@ -9,15 +12,17 @@ from pathlib import Path
 
 import pytest
 
-from src.contracts import (
+from src.models.field_allowlist import (
+    MATCHABLE_FIELDS,
+    MATCHABLE_OPTIONAL,
+    MATCHABLE_REQUIRED,
+)
+from src.models.validation_limits import (
+    COOLDOWN_FIELDS_MAX,
     COOLDOWN_SECONDS_MAX,
     GRACE_SECONDS_DEFAULT,
     GRACE_SECONDS_MAX,
     GRACE_SECONDS_MIN,
-    MATCHABLE_FIELDS,
-    MATCHABLE_OPTIONAL,
-    MATCHABLE_REQUIRED,
-    COOLDOWN_FIELDS_MAX,
     SCRIPT_MAX_BYTES,
     TIMEOUT_SECONDS_DEFAULT,
     TIMEOUT_SECONDS_MAX,

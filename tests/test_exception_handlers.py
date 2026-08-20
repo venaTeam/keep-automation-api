@@ -16,7 +16,7 @@ from fastapi import APIRouter
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
-from src.contracts.validation_errors import ErrorCode, FieldError
+from src.models.api.validation_errors import ErrorCode, FieldError
 from src.exceptions import (
     AutomationBuildingError,
     AutomationNotFoundError,

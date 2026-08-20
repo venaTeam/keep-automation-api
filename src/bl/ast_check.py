@@ -7,8 +7,8 @@ statements; parsing cannot. tests/test_ast_check.py asserts this structurally.
 """
 import ast
 
-from src.contracts.limits import SCRIPT_MAX_BYTES
-from src.contracts.validation_errors import ErrorCode, FieldError
+from src.models.validation_limits import SCRIPT_MAX_BYTES
+from src.models.api.validation_errors import ErrorCode, FieldError
 
 HANDLE_PARAMS_MIN = 1
 HANDLE_PARAMS_MAX = 2

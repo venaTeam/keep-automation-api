@@ -6,8 +6,8 @@ from src.bl.validation import (
     validate_timeout,
     validate_triggers,
 )
-from src.contracts.field_allowlist import MATCHABLE_FIELDS
-from src.contracts.limits import (
+from src.models.field_allowlist import MATCHABLE_FIELDS
+from src.models.validation_limits import (
     COOLDOWN_SECONDS_MAX,
     GRACE_SECONDS_MAX,
     GRACE_SECONDS_MIN,
@@ -15,7 +15,7 @@ from src.contracts.limits import (
     TRIGGER_VALUE_MAX_BYTES,
     TRIGGERS_MAX,
 )
-from src.contracts.validation_errors import ErrorCode
+from src.models.api.validation_errors import ErrorCode
 from src.models.api.automation import AutomationIn
 
 TWO_TRIGGERS = [

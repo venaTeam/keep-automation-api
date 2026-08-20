@@ -5,7 +5,7 @@ from uuid import uuid4
 
 from sqlalchemy import text
 
-from src.contracts.field_allowlist import MATCHABLE_OPTIONAL, MATCHABLE_REQUIRED
+from src.models.field_allowlist import MATCHABLE_OPTIONAL, MATCHABLE_REQUIRED
 from tests.conftest import OTHER_TENANT, TENANT
 
 FIXTURES = Path(__file__).parent / "fixtures"

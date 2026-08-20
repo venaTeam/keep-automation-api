@@ -1,5 +1,5 @@
 """Domain exceptions raised by the BL and mapped to HTTP responses in routes."""
-from src.contracts.validation_errors import FieldError
+from src.models.api.validation_errors import FieldError
 
 
 class AutomationValidationError(Exception):

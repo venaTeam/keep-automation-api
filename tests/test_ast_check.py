@@ -3,8 +3,8 @@ import ast
 from pathlib import Path
 
 from src.bl.ast_check import validate_script
-from src.contracts.limits import SCRIPT_MAX_BYTES
-from src.contracts.validation_errors import ErrorCode
+from src.models.validation_limits import SCRIPT_MAX_BYTES
+from src.models.api.validation_errors import ErrorCode
 
 
 def code_of(errors):

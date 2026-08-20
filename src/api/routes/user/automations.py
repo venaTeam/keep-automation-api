@@ -25,7 +25,7 @@ from fastapi.concurrency import run_in_threadpool
 from src.api.deps import get_authenticated_entity, get_git_client
 from src.bl import automations_bl
 from src.bl.git_client import GitClient
-from src.contracts.field_allowlist import MATCHABLE_OPTIONAL, MATCHABLE_REQUIRED
+from src.models.field_allowlist import MATCHABLE_OPTIONAL, MATCHABLE_REQUIRED
 from src.models.api.automation import AutomationIn, AutomationListItem, AutomationOut
 from src.models.api.identity import AuthenticatedEntity
 from src.models.db.automation import Automation, BuildState, MatchingState

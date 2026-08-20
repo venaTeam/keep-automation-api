@@ -2,7 +2,7 @@
 import pytest
 from pydantic import ValidationError
 
-from src.contracts.limits import SCRIPT_MAX_BYTES
+from src.models.validation_limits import SCRIPT_MAX_BYTES
 from src.models.api.automation import AutomationIn, AutomationOut
 
 VALID_PAYLOAD = {

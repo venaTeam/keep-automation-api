@@ -5,7 +5,7 @@ from concurrent.futures import TimeoutError as FutureTimeoutError
 import pytest
 
 from src.bl import ssrf
-from src.contracts.validation_errors import ErrorCode
+from src.models.api.validation_errors import ErrorCode
 
 
 def code_of(errors):

@@ -1,5 +1,5 @@
 """Authoring validation limits (spec §4.1 / §7.6, automation-contracts.md §Validation errors)."""
-from src.contracts.field_allowlist import MATCHABLE_FIELDS
+from src.models.field_allowlist import MATCHABLE_FIELDS
 
 # Structural guard behind the pinned M ≤ 3 fan-out assumption (spec §4.2).
 TRIGGERS_MIN = 2

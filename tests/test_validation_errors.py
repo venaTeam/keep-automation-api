@@ -2,7 +2,7 @@
 import json
 from pathlib import Path
 
-from src.contracts.validation_errors import (
+from src.models.api.validation_errors import (
     ErrorCode,
     FieldError,
     ValidationErrorResponse,

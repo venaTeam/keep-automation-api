@@ -33,7 +33,7 @@ from src.exceptions import (
     AutomationNotFoundError,
     AutomationValidationError,
 )
-from src.contracts.limits import TIMEOUT_SECONDS_DEFAULT, GRACE_SECONDS_DEFAULT
+from src.models.validation_limits import TIMEOUT_SECONDS_DEFAULT, GRACE_SECONDS_DEFAULT
 from src.models.api.automation import AutomationIn
 from src.models.db.automation import Automation, BuildState, MatchingState
 from src.models.db.automation_revision import AutomationRevision, RevisionAction

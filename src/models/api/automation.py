@@ -11,7 +11,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, validator
 
-from src.contracts.limits import SCRIPT_MAX_BYTES
+from src.models.validation_limits import SCRIPT_MAX_BYTES
 from src.models.db.automation import BuildState, MatchingState
 
 

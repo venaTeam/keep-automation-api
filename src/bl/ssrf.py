@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from urllib.parse import urlparse
 
-from src.contracts.validation_errors import ErrorCode, FieldError
+from src.models.api.validation_errors import ErrorCode, FieldError
 
 RESOLVE_TIMEOUT_SECONDS = 3.0
 
