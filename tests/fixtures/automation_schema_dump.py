@@ -6,9 +6,10 @@ VENDORED BYTE-IDENTICALLY INTO TWO REPOS
     keep-automation-api/tests/fixtures/automation_schema_dump.py
 
 together with its golden fixture, ``automation_schema.json``, in the same
-directory of each. Same convention as keep-automation-api's ``src/contracts/``
-(ADR-008): a cross-repo artifact is vendored, not imported, because neither
-repo's CI checks out the other.
+directory of each. A cross-repo artifact is vendored, not imported, because
+neither repo's CI checks out the other. (ADR-018's doc-only contracts decision
+removed the ``src/contracts/`` package it once shared this convention with;
+this fixture pair and its move-together rule are unaffected.)
 
 **Any change to the automation schema updates the keep-api-gateway migration,
 the keep-automation-api ORM models, and BOTH copies of ``automation_schema.json``
