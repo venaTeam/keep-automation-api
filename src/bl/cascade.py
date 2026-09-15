@@ -370,3 +370,110 @@ def run_cascade_in_background(automation_id: UUID, deps: CascadeDeps) -> None:
             automation_id,
             type(exc).__name__,
         )
+
+
+# --- deboard --------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class DeboardSummary:
+    """Outcome of one `deboard_wallet` pass, derived from the child rows.
+
+    - `deleted`: the child reached `deleted` (including ones already deleted
+      by an earlier pass that this pass finished).
+    - `in_progress`: deletion was admitted (`deleting`) but this attempt stopped
+      at a checkpoint — a later call, repeated DELETE or resume continues it.
+    - `skipped_building`: refused by the build guard; untouched, never
+      cancelled. A later call deletes it once its build settles.
+    - `failed`: deletion could not even be admitted (unexpected error); the
+      child is still active/inactive.
+    """
+
+    deleted: tuple[UUID, ...] = ()
+    in_progress: tuple[UUID, ...] = ()
+    skipped_building: tuple[UUID, ...] = ()
+    failed: tuple[UUID, ...] = ()
+
+    def counts(self) -> dict[str, int]:
+        return {
+            "deleted": len(self.deleted),
+            "in_progress": len(self.in_progress),
+            "skipped_building": len(self.skipped_building),
+            "failed": len(self.failed),
+        }
+
+
+def deboard_wallet(
+    tenant_id: str, wallet_name: str, actor: str, deps: CascadeDeps
+) -> DeboardSummary:
+    """Run the single-automation delete for every automation on a tenant's wallet.
+
+    Spec §5.4: deboard is the same cascade fanned out — no separate cascade, no
+    deboard table; progress is read back from the child rows, so calling again
+    simply resumes. Scoped by tenant AND wallet (the `(tenant_id, namespace)`
+    index): two tenants can target the same wallet name, and deboarding one must
+    never touch the other's automations. Unbounded on purpose — the authoring
+    list's row limit must not silently leave automations behind.
+
+    One child's failure never stops the rest. Never touches the wallet itself
+    (namespace, quota, permissions) or any team Secret. No HTTP route: whoever
+    adds a caller (F25 / ops) owns its entry point and authorization.
+    """
+    with get_session() as session:
+        automation_ids = list(
+            session.scalars(
+                select(Automation.id)
+                .where(
+                    Automation.tenant_id == tenant_id,
+                    Automation.namespace == wallet_name,
+                    Automation.matching_state != MatchingState.DELETED,
+                )
+                .order_by(Automation.created_at, Automation.id)
+            ).all()
+        )
+
+    deleted: list[UUID] = []
+    in_progress: list[UUID] = []
+    skipped_building: list[UUID] = []
+    failed: list[UUID] = []
+    for automation_id in automation_ids:
+        try:
+            begin_delete(tenant_id, automation_id, actor, deps.publisher)
+        except AutomationBuildingError:
+            skipped_building.append(automation_id)
+            continue
+        except Exception as exc:  # noqa: BLE001 — isolate children
+            logger.warning(
+                "automations: deboard of %s could not admit %s (%s)",
+                wallet_name,
+                automation_id,
+                type(exc).__name__,
+            )
+            failed.append(automation_id)
+            continue
+
+        try:
+            result = run_cascade(automation_id, deps)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "automations: deboard cascade for %s crashed (%s)",
+                automation_id,
+                type(exc).__name__,
+            )
+            in_progress.append(automation_id)
+            continue
+        (deleted if result.completed else in_progress).append(automation_id)
+
+    summary = DeboardSummary(
+        deleted=tuple(deleted),
+        in_progress=tuple(in_progress),
+        skipped_building=tuple(skipped_building),
+        failed=tuple(failed),
+    )
+    logger.info(
+        "automations: deboard pass for tenant %s wallet %s: %s",
+        tenant_id,
+        wallet_name,
+        summary.counts(),
+    )
+    return summary
