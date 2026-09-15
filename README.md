@@ -130,6 +130,10 @@ D14.
 and E21 re-drive gate), `lock_for_build_mutation` (D15 cutover fencing),
 `cascade.deboard_wallet(tenant_id, wallet, actor, deps)` (F25/ops — no route).
 
+Never-invoked runs of a deleting/deleted automation are finalized `suppressed`
+with `suppression_reason=inactive`. That enum value needs keep-migrations revision
+`automation_suppression_reason_inactive` applied **before** this service deploys.
+
 ### Runbook: stuck deletion
 
 - Row `matching_state=deleting`, `delete_cascade_step` not advancing → log line

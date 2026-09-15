@@ -124,7 +124,7 @@ def test_pending_never_invoked_run_is_suppressed_not_deletion_killed(
     assert run.state == RunState.SUPPRESSED
     stored = _run_row(test_engine, run_id)
     assert stored.failure_class is None
-    assert stored.suppression_reason is None
+    assert stored.suppression_reason == "inactive"
 
 
 def test_run_of_live_automation_is_not_attributed_to_deletion(test_engine, automation_id):

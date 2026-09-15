@@ -29,7 +29,12 @@ from src.exceptions import (
     RunNotFoundError,
 )
 from src.models.db.automation import DELETION_STATES, Automation, MatchingState
-from src.models.db.automation_run import AutomationRun, FailureClass, RunState
+from src.models.db.automation_run import (
+    AutomationRun,
+    FailureClass,
+    RunState,
+    SuppressionReason,
+)
 
 OPEN_RUN_STATES = (RunState.PENDING, RunState.SUBMITTED)
 
@@ -88,9 +93,10 @@ def finalize_terminated_by_deletion(run_id: UUID) -> AutomationRun:
     - `submitted` (a `/run` was, or may have been, in flight) → `failed` +
       `terminated_by_deletion` + `finished_at`. `attempts`, `automation_digest`
       and any recorded `outcome_status` are kept; no wrapper outcome is invented.
-    - `pending` (never invoked) → `suppressed` with no reason: the automation is
-      no longer active, the same skip D17 audits for inactive (contracts
-      §Submit). It was never executed, so it is not a deletion-killed run.
+    - `pending` (never invoked) → `suppressed` + `suppression_reason=inactive`:
+      the automation is no longer active, the same skip D17 audits at its
+      re-check (contracts §Submit). It was never executed, so it is not a
+      deletion-killed run.
     - already terminal → returned unchanged; a committed success or failure is
       never overwritten.
     - automation still active/inactive → AutomationLifecycleConflictError: an
@@ -112,7 +118,11 @@ def finalize_terminated_by_deletion(run_id: UUID) -> AutomationRun:
             failure_class=FailureClass.TERMINATED_BY_DELETION,
         )
     else:
-        complete_run_if_open(run_id, state=RunState.SUPPRESSED)
+        complete_run_if_open(
+            run_id,
+            state=RunState.SUPPRESSED,
+            suppression_reason=SuppressionReason.INACTIVE,
+        )
     return _load_run(run_id)
 
 
