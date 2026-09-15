@@ -36,7 +36,12 @@ from src.exceptions import (
 )
 from src.contracts.limits import TIMEOUT_SECONDS_DEFAULT, GRACE_SECONDS_DEFAULT
 from src.models.api.automation import AutomationIn
-from src.models.db.automation import Automation, BuildState, MatchingState
+from src.models.db.automation import (
+    DELETION_STATES,
+    Automation,
+    BuildState,
+    MatchingState,
+)
 from src.models.db.automation_revision import AutomationRevision, RevisionAction
 
 # Bounded list query — ~500 automations expected; pagination is a follow-up.
@@ -49,7 +54,7 @@ def _validated(data: AutomationIn) -> None:
         raise AutomationValidationError(errors)
 
 
-def _scoped_get(
+def scoped_get(
     session, tenant_id: str, automation_id: UUID, for_update: bool = False
 ) -> Automation:
     """Fetch one automation *within* a tenant, or raise not-found.
@@ -131,11 +136,11 @@ def update_automation(
     # session; a wasted validation on that path costs nothing.
     _validated(data)
     with get_session() as session:
-        automation = _scoped_get(session, tenant_id, automation_id, for_update=True)
+        automation = scoped_get(session, tenant_id, automation_id, for_update=True)
         # Lifecycle before build: a deleting/deleted row is never editable, and
         # an edit would re-arm a build that recreates CAPP resources the
         # cascade is tearing down (D18). Same row lock as DELETE admission.
-        if automation.matching_state in (MatchingState.DELETING, MatchingState.DELETED):
+        if automation.matching_state in DELETION_STATES:
             raise AutomationLifecycleConflictError(automation.matching_state.value)
         if automation.build_state == BuildState.BUILDING:
             raise AutomationBuildingError()
@@ -175,7 +180,7 @@ def get_automation(
     tenant_id: str, automation_id: UUID, git: GitClient
 ) -> tuple[Automation, str | None]:
     with get_session() as session:
-        automation = _scoped_get(session, tenant_id, automation_id)
+        automation = scoped_get(session, tenant_id, automation_id)
         session.expunge(automation)
     script = git.read_script(automation.script_path)
     return automation, script

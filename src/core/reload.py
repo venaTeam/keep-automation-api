@@ -82,17 +82,21 @@ class RedisReloadPublisher:
 
 
 _default_publisher: ReloadPublisher | None = None
+_default_publisher_lock = threading.Lock()
 
 
 def get_default_reload_publisher() -> ReloadPublisher:
+    """Process-wide publisher, built once under a lock: concurrent first
+    requests from the threadpool must not each build a client and pool."""
     global _default_publisher
-    if _default_publisher is None:
-        if config.REDIS_URL:
-            _default_publisher = RedisReloadPublisher(
-                config.REDIS_URL,
-                config.AUTOMATION_RELOAD_CHANNEL,
-                config.REDIS_PUBLISH_TIMEOUT_SECONDS,
-            )
-        else:
-            _default_publisher = NullReloadPublisher()
-    return _default_publisher
+    with _default_publisher_lock:
+        if _default_publisher is None:
+            if config.REDIS_URL:
+                _default_publisher = RedisReloadPublisher(
+                    config.REDIS_URL,
+                    config.AUTOMATION_RELOAD_CHANNEL,
+                    config.REDIS_PUBLISH_TIMEOUT_SECONDS,
+                )
+            else:
+                _default_publisher = NullReloadPublisher()
+        return _default_publisher

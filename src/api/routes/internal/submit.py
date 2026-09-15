@@ -8,13 +8,13 @@ row and **refuse** the submit if that row's `tenant_id` differs — an error
 response, not a `suppressed` run, and `/run` is never called. `tenant_id` stays
 out of the `(history_id, automation_id)` uniqueness key.
 """
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, status
 
 from src.api.deps import verify_service_token
 
 router = APIRouter(dependencies=[Depends(verify_service_token)])
 
 
-@router.post("/internal/submit", status_code=200)
+@router.post("/internal/submit", status_code=status.HTTP_200_OK)
 async def submit():
     return {"status": "ok"}

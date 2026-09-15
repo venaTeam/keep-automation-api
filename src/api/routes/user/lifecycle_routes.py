@@ -14,19 +14,15 @@ internal route over `cascade.resume_delete`; deboard has no route at all.
 """
 from uuid import UUID
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, Response, status
 from fastapi.concurrency import run_in_threadpool
 
 from src.api.deps import (
     get_authenticated_entity,
-    get_capp_deletion_client,
-    get_git_client,
-    get_registry_client,
+    get_cascade_deps,
     get_reload_publisher,
 )
 from src.bl import cascade, lifecycle
-from src.bl.cascade_adapters import CappDeletionClient, RegistryClient
-from src.bl.git_client import GitClient
 from src.core.reload import ReloadPublisher
 from src.models.api.automation import LifecycleStatusOut
 from src.models.api.identity import AuthenticatedEntity
@@ -35,7 +31,7 @@ from src.models.db.automation import MatchingState
 router = APIRouter(dependencies=[Depends(get_authenticated_entity)])
 
 
-@router.post("/automations/{automation_id}/enable", status_code=200)
+@router.post("/automations/{automation_id}/enable", status_code=status.HTTP_200_OK)
 async def enable_automation(
     automation_id: UUID,
     entity: AuthenticatedEntity = Depends(get_authenticated_entity),
@@ -51,7 +47,7 @@ async def enable_automation(
     return LifecycleStatusOut.from_orm(automation).dict()
 
 
-@router.post("/automations/{automation_id}/disable", status_code=200)
+@router.post("/automations/{automation_id}/disable", status_code=status.HTTP_200_OK)
 async def disable_automation(
     automation_id: UUID,
     entity: AuthenticatedEntity = Depends(get_authenticated_entity),
@@ -67,16 +63,20 @@ async def disable_automation(
     return LifecycleStatusOut.from_orm(automation).dict()
 
 
-@router.delete("/automations/{automation_id}", status_code=202)
+@router.delete(
+    "/automations/{automation_id}",
+    status_code=status.HTTP_202_ACCEPTED,
+    responses={
+        status.HTTP_200_OK: {"description": "Already deleted"},
+        status.HTTP_409_CONFLICT: {"description": "Automation is mid-build"},
+    },
+)
 async def delete_automation(
     automation_id: UUID,
     response: Response,
     background_tasks: BackgroundTasks,
     entity: AuthenticatedEntity = Depends(get_authenticated_entity),
-    publisher: ReloadPublisher = Depends(get_reload_publisher),
-    capp: CappDeletionClient = Depends(get_capp_deletion_client),
-    registry: RegistryClient = Depends(get_registry_client),
-    git: GitClient = Depends(get_git_client),
+    deps: cascade.CascadeDeps = Depends(get_cascade_deps),
 ):
     """Start (or continue) the delete cascade; returns before any external call.
 
@@ -89,16 +89,12 @@ async def delete_automation(
         entity.tenant_id,
         automation_id,
         entity.email,
-        publisher,
+        deps.publisher,
     )
     if automation.matching_state == MatchingState.DELETED:
-        response.status_code = 200
+        response.status_code = status.HTTP_200_OK
     else:
         background_tasks.add_task(
-            cascade.run_cascade_in_background,
-            automation.id,
-            cascade.CascadeDeps(
-                capp=capp, registry=registry, git=git, publisher=publisher
-            ),
+            cascade.run_cascade_in_background, automation.id, deps
         )
     return LifecycleStatusOut.from_orm(automation).dict()

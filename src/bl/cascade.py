@@ -40,7 +40,7 @@ from uuid import UUID
 
 from sqlalchemy import func, select, update
 
-from src.bl.automations_bl import _scoped_get
+from src.bl.automations_bl import scoped_get
 from src.bl.cascade_adapters import (
     CappDeletionClient,
     RegistryClient,
@@ -55,7 +55,12 @@ from src.exceptions import (
     AutomationLifecycleConflictError,
     AutomationNotFoundError,
 )
-from src.models.db.automation import Automation, BuildState, MatchingState
+from src.models.db.automation import (
+    DELETION_STATES,
+    Automation,
+    BuildState,
+    MatchingState,
+)
 from src.models.db.automation_revision import AutomationRevision, RevisionAction
 
 logger = logging.getLogger(__name__)
@@ -129,8 +134,8 @@ def begin_delete(
     recreate an untracked Capp.
     """
     with get_session() as session:
-        automation = _scoped_get(session, tenant_id, automation_id, for_update=True)
-        if automation.matching_state in (MatchingState.DELETING, MatchingState.DELETED):
+        automation = scoped_get(session, tenant_id, automation_id, for_update=True)
+        if automation.matching_state in DELETION_STATES:
             session.expunge(automation)
             return automation
         if automation.build_state == BuildState.BUILDING:
@@ -268,7 +273,13 @@ def _step_delete_images(automation: Automation, deps: CascadeDeps) -> None:
     except Exception as exc:  # noqa: BLE001
         raise CascadeStepError(step, "registry_list_failed", exc) from exc
     for digest in digests:
-        _external(step, "registry_delete_failed", deps.registry.delete_image, automation.id, digest)
+        _external(
+            step,
+            "registry_delete_failed",
+            deps.registry.delete_image,
+            automation.id,
+            digest,
+        )
     # Advance only on an empty inventory: a digest pushed while we deleted (a
     # late build, C2/C3) must not be left behind under a "done" checkpoint.
     try:

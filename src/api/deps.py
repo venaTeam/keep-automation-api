@@ -5,8 +5,9 @@
 - machine tier -> GitLab secret token (verified in D15).
 - internal tier -> service token (verified in D17/D20).
 """
-from fastapi import Header
+from fastapi import Depends, Header
 
+from src.bl.cascade import CascadeDeps
 from src.bl.cascade_adapters import (
     CappDeletionClient,
     RegistryClient,
@@ -36,6 +37,17 @@ def get_capp_deletion_client() -> CappDeletionClient:
 def get_registry_client() -> RegistryClient:
     """Registry image deletion. Fails closed until A0's credentials are wired."""
     return get_default_registry_client()
+
+
+def get_cascade_deps(
+    capp: CappDeletionClient = Depends(get_capp_deletion_client),
+    registry: RegistryClient = Depends(get_registry_client),
+    git: GitClient = Depends(get_git_client),
+    publisher: ReloadPublisher = Depends(get_reload_publisher),
+) -> CascadeDeps:
+    """The delete cascade's adapters, bundled. Each stays individually
+    overridable (tests, and D14/D16/A0 swapping in real clients)."""
+    return CascadeDeps(capp=capp, registry=registry, git=git, publisher=publisher)
 
 
 async def get_authenticated_entity() -> AuthenticatedEntity:

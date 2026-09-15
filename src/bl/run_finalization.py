@@ -28,11 +28,20 @@ from src.exceptions import (
     AutomationNotFoundError,
     RunNotFoundError,
 )
-from src.models.db.automation import Automation, MatchingState
+from src.models.db.automation import DELETION_STATES, Automation, MatchingState
 from src.models.db.automation_run import AutomationRun, FailureClass, RunState
 
 OPEN_RUN_STATES = (RunState.PENDING, RunState.SUBMITTED)
-DELETION_STATES = (MatchingState.DELETING, MatchingState.DELETED)
+
+
+def _matching_state(automation_id: UUID) -> MatchingState:
+    with get_session() as session:
+        state = session.scalar(
+            select(Automation.matching_state).where(Automation.id == automation_id)
+        )
+    if state is None:
+        raise AutomationNotFoundError()
+    return state
 
 
 def deletion_started(automation_id: UUID) -> bool:
@@ -41,13 +50,7 @@ def deletion_started(automation_id: UUID) -> bool:
     D17 checks this before the first `/run` and before every retry; E21/D20
     checks it before any re-drive (C1) — a deleting automation is never invoked.
     """
-    with get_session() as session:
-        state = session.scalar(
-            select(Automation.matching_state).where(Automation.id == automation_id)
-        )
-    if state is None:
-        raise AutomationNotFoundError()
-    return state in DELETION_STATES
+    return _matching_state(automation_id) in DELETION_STATES
 
 
 def complete_run_if_open(run_id: UUID, **values) -> bool:
@@ -98,13 +101,8 @@ def finalize_terminated_by_deletion(run_id: UUID) -> AutomationRun:
     run = _load_run(run_id)
     if run.state not in OPEN_RUN_STATES:
         return run
-    if not deletion_started(run.automation_id):
-        with get_session() as session:
-            state = session.scalar(
-                select(Automation.matching_state).where(
-                    Automation.id == run.automation_id
-                )
-            )
+    state = _matching_state(run.automation_id)
+    if state not in DELETION_STATES:
         raise AutomationLifecycleConflictError(state.value)
 
     if run.state == RunState.SUBMITTED:

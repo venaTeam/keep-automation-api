@@ -83,10 +83,14 @@ class UnconfiguredCappDeletionClient:
 
 class UnconfiguredRegistryClient:
     def list_image_digests(self, automation_id: UUID) -> list[str]:
-        raise ExternalDependencyNotConfiguredError("registry client not configured (A0)")
+        raise ExternalDependencyNotConfiguredError(
+            "registry client not configured (A0)"
+        )
 
     def delete_image(self, automation_id: UUID, digest: str) -> None:
-        raise ExternalDependencyNotConfiguredError("registry client not configured (A0)")
+        raise ExternalDependencyNotConfiguredError(
+            "registry client not configured (A0)"
+        )
 
 
 _default_capp = UnconfiguredCappDeletionClient()

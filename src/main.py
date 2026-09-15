@@ -7,7 +7,7 @@ import logging
 from contextlib import asynccontextmanager
 
 from dotenv import find_dotenv, load_dotenv
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -79,7 +79,9 @@ def get_app() -> FastAPI:
                     "message": pydantic_error["msg"],
                 }
             )
-        return JSONResponse(status_code=400, content={"errors": errors})
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST, content={"errors": errors}
+        )
 
     # Domain exceptions are mapped once, here, rather than in per-route
     # try/except blocks: the routes stay thin (rules/automation-api.md), a new
@@ -92,7 +94,7 @@ def get_app() -> FastAPI:
         # Same accumulating shape as RequestValidationError above — the UI keys
         # off `code`, so both paths must be indistinguishable to it.
         return JSONResponse(
-            status_code=400,
+            status_code=status.HTTP_400_BAD_REQUEST,
             content={"errors": [e.dict() for e in exc.errors]},
         )
 
@@ -102,14 +104,17 @@ def get_app() -> FastAPI:
     ) -> JSONResponse:
         # Also the cross-tenant answer: an id owned by another tenant is a 404,
         # never a 403, so existence never leaks (spec §8.1).
-        return JSONResponse(status_code=404, content={"detail": "Automation not found"})
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content={"detail": "Automation not found"},
+        )
 
     @app.exception_handler(AutomationBuildingError)
     async def automation_building_handler(
         request: Request, exc: AutomationBuildingError
     ) -> JSONResponse:
         return JSONResponse(
-            status_code=409,
+            status_code=status.HTTP_409_CONFLICT,
             content={
                 "detail": "Automation is mid-build; retry after the build completes"
             },
@@ -122,7 +127,7 @@ def get_app() -> FastAPI:
         # Raised only after the tenant-scoped lookup succeeded, so the 409 never
         # confirms another tenant's row exists.
         return JSONResponse(
-            status_code=409,
+            status_code=status.HTTP_409_CONFLICT,
             content={
                 "detail": (
                     "Automation is being deleted or was deleted; "

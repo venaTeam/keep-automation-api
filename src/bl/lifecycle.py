@@ -20,16 +20,13 @@ from uuid import UUID
 
 from sqlalchemy import func
 
-from src.bl.automations_bl import _scoped_get
+from src.bl.automations_bl import scoped_get
 from src.contracts.validation_errors import ErrorCode, FieldError
 from src.core.db import get_session
 from src.core.reload import ReloadPublisher
 from src.exceptions import AutomationLifecycleConflictError, AutomationValidationError
-from src.models.db.automation import Automation, MatchingState
+from src.models.db.automation import DELETION_STATES, Automation, MatchingState
 from src.models.db.automation_revision import AutomationRevision, RevisionAction
-
-# States a user can no longer toggle out of — deletion is one-way.
-TERMINAL_LIFECYCLE_STATES = (MatchingState.DELETING, MatchingState.DELETED)
 
 
 def _toggle(
@@ -41,8 +38,8 @@ def _toggle(
     action: RevisionAction,
 ) -> Automation:
     with get_session() as session:
-        automation = _scoped_get(session, tenant_id, automation_id, for_update=True)
-        if automation.matching_state in TERMINAL_LIFECYCLE_STATES:
+        automation = scoped_get(session, tenant_id, automation_id, for_update=True)
+        if automation.matching_state in DELETION_STATES:
             raise AutomationLifecycleConflictError(automation.matching_state.value)
         # Building alone does not block a toggle: an active automation keeps
         # serving `active_digest=old` through an edit's build (spec §5.3).
