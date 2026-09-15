@@ -20,8 +20,9 @@ is never deleted; rows, revisions, runs and script bytes persist forever.
 operation is delete-if-exists, so re-running one after a lost response or a lost
 checkpoint is harmless. Checkpoints advance with compare-and-set updates
 (`WHERE delete_cascade_step = <expected>`), so two runners on the same row — two
-API replicas, the DELETE's attempt racing a reconciler resume — may repeat a step but can
-never move the checkpoint backward or skip one. No Python lock is involved.
+API replicas, the DELETE's attempt racing a reconciler resume — may repeat a
+step but can never move the checkpoint backward or skip one. No Python lock is
+involved.
 
 **Blocking I/O shape (ADR-008).** Every function here is synchronous and runs in
 the threadpool. External calls happen with no DB session open: a snapshot is
@@ -440,8 +441,9 @@ def deboard_wallet(
     Spec §5.4: deboard is the same cascade fanned out — no separate cascade, no
     deboard table; progress is read back from the child rows. Unlike a repeated
     user DELETE, deboard is an explicit operator pass, so it runs the cascade for
-    children already `deleting` too: calling again resumes. Scoped by tenant AND wallet (the `(tenant_id, namespace)`
-    index): two tenants can target the same wallet name, and deboarding one must
+    children already `deleting` too: calling again resumes. Scoped by tenant AND
+    wallet (the `(tenant_id, namespace)` index): two tenants can target the same
+    wallet name, and deboarding one must
     never touch the other's automations. Unbounded on purpose — the authoring
     list's row limit must not silently leave automations behind.
 
