@@ -113,3 +113,17 @@ AUTOMATION_RELOAD_CHANNEL = os.environ.get("AUTOMATION_RELOAD_CHANNEL", "reload"
 REDIS_PUBLISH_TIMEOUT_SECONDS = float(
     os.environ.get("REDIS_PUBLISH_TIMEOUT_SECONDS", "1.0")
 )
+
+# How long a row-lock acquisition (SELECT ... FOR UPDATE on an automation) waits
+# before giving up. Must stay well under DB_STATEMENT_TIMEOUT_MS: a lock wait
+# counts against the statement timeout, and hitting that surfaces as a generic
+# 500. Hitting this instead is mapped to a clean `503` + Retry-After — the row is
+# busy for a moment (another edit/toggle/delete admission), a retry succeeds.
+DB_LOCK_TIMEOUT_MS = int(os.environ.get("DATABASE_LOCK_TIMEOUT_MS", "2000"))
+
+# Build lock (spec §4.4 `build_lock_deadline`, §6.2): how long an edit/create
+# may hold `build_state=building` before E21's stuck-build branch may release
+# it. Must exceed the p99 pipeline + CAPP rollout time (spec: 30 min).
+BUILD_LOCK_TIMEOUT_SECONDS = int(
+    os.environ.get("AUTOMATION_BUILD_LOCK_TIMEOUT_SECONDS", "1800")
+)

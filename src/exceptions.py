@@ -32,3 +32,21 @@ class AutomationLifecycleConflictError(Exception):
 
 class RunNotFoundError(Exception):
     pass
+
+
+class AutomationBusyError(Exception):
+    """The automation row stayed locked past DB_LOCK_TIMEOUT_MS.
+
+    Another admission (edit claim, toggle, delete, build cutover) holds it for a
+    moment. Transient by definition — mapped to 503 + Retry-After (spec §8.4:
+    5xx transient, callers back off and retry).
+    """
+
+
+class AutomationEditSupersededError(Exception):
+    """An edit's build claim was released before the edit could finish.
+
+    The script was committed to git, but in between the reconciler released the
+    build lock past its deadline (E21) and the row moved on. The edit is not
+    applied to the definition; the author reloads and retries.
+    """

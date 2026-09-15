@@ -15,6 +15,8 @@ from fastapi.responses import JSONResponse
 from src import config
 from src.exceptions import (
     AutomationBuildingError,
+    AutomationBusyError,
+    AutomationEditSupersededError,
     AutomationLifecycleConflictError,
     AutomationNotFoundError,
     AutomationValidationError,
@@ -134,6 +136,31 @@ def get_app() -> FastAPI:
                     "this transition is no longer allowed"
                 ),
                 "matching_state": exc.matching_state,
+            },
+        )
+
+    @app.exception_handler(AutomationBusyError)
+    async def automation_busy_handler(
+        request: Request, exc: AutomationBusyError
+    ) -> JSONResponse:
+        # Transient row contention, not a conflict: a retry succeeds (§8.4).
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            headers={"Retry-After": "1"},
+            content={"detail": "Automation is busy; retry shortly"},
+        )
+
+    @app.exception_handler(AutomationEditSupersededError)
+    async def automation_edit_superseded_handler(
+        request: Request, exc: AutomationEditSupersededError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content={
+                "detail": (
+                    "The automation changed while this edit was being saved; "
+                    "reload it and retry"
+                )
             },
         )
 

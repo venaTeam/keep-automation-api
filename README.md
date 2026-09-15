@@ -72,6 +72,22 @@ Auth is driven by the **existing identity provider** — never a second auth sta
 (§10.2). A minimal noauth shim stands in until the shared identity manager is
 vendored.
 
+## Authoring writes and git (D14-ready)
+
+Git I/O never runs inside a DB transaction or under a row lock:
+
+- **Create** commits the script to git first, then inserts the row + revision
+  in one short transaction (`building`, `building_sha`, `build_lock_deadline`).
+- **Edit** claims `build_state=building` in a short row-locked transaction,
+  commits to git with no session open, then writes the definition,
+  `building_sha` and revision in a second short transaction — only if the claim
+  (fenced by its deadline) is still its own; otherwise `409`. A git failure
+  restores the previous build state.
+- Every row-lock acquisition waits at most `DATABASE_LOCK_TIMEOUT_MS` (2000);
+  past that the request is `503` + `Retry-After: 1`, never a statement-timeout
+  500. Code that later adds CAPP/git calls (D15/D16) must keep this shape:
+  claim, call with no session, finish.
+
 ## Lifecycle (D18)
 
 | Endpoint | Behaviour |

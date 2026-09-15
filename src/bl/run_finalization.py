@@ -22,7 +22,7 @@ from uuid import UUID
 
 from sqlalchemy import func, select, update
 
-from src.core.db import get_session
+from src.core.db import get_session, lock_first
 from src.exceptions import (
     AutomationLifecycleConflictError,
     AutomationNotFoundError,
@@ -124,11 +124,14 @@ def lock_for_build_mutation(session, automation_id: UUID) -> Automation | None:
     Secret nobody tracks. Uses the same row lock as DELETE admission, so either
     the build is admitted first (DELETE then sees `building` → 409) or the delete
     is (the build sees `deleting` → no-op). The caller keeps `session` open for
-    its state write and commits it; the lock is held until then.
+    its state write and commits it; the lock is held until then — so the caller
+    must not do CAPP or git I/O inside that session (claim, commit, call, then
+    finish in a second short transaction, as `update_automation` does). A row
+    locked past DB_LOCK_TIMEOUT_MS raises AutomationBusyError.
     """
-    automation = session.scalars(
-        select(Automation).where(Automation.id == automation_id).with_for_update()
-    ).first()
+    automation = lock_first(
+        session, select(Automation).where(Automation.id == automation_id)
+    )
     if automation is None:
         raise AutomationNotFoundError()
     if automation.matching_state in DELETION_STATES:

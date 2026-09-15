@@ -19,6 +19,8 @@ from fastapi.testclient import TestClient
 from src.contracts.validation_errors import ErrorCode, FieldError
 from src.exceptions import (
     AutomationBuildingError,
+    AutomationBusyError,
+    AutomationEditSupersededError,
     AutomationLifecycleConflictError,
     AutomationNotFoundError,
     AutomationValidationError,
@@ -55,6 +57,14 @@ def raising_client(test_engine):
     @router.get("/_raises/building")
     async def _building():
         raise AutomationBuildingError()
+
+    @router.get("/_raises/busy")
+    async def _busy():
+        raise AutomationBusyError()
+
+    @router.get("/_raises/edit-superseded")
+    async def _edit_superseded():
+        raise AutomationEditSupersededError()
 
     @router.get("/_raises/lifecycle-conflict")
     async def _lifecycle_conflict():
@@ -99,6 +109,18 @@ def test_lifecycle_conflict_becomes_409(raising_client):
     resp = raising_client.get("/_raises/lifecycle-conflict")
     assert resp.status_code == 409
     assert resp.json()["matching_state"] == "deleted"
+
+
+def test_busy_becomes_503_with_retry_after(raising_client):
+    resp = raising_client.get("/_raises/busy")
+    assert resp.status_code == 503
+    assert resp.headers["Retry-After"] == "1"
+
+
+def test_edit_superseded_becomes_409(raising_client):
+    resp = raising_client.get("/_raises/edit-superseded")
+    assert resp.status_code == 409
+    assert "reload" in resp.json()["detail"]
 
 
 def test_every_route_declares_an_explicit_status_code():
