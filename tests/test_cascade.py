@@ -41,7 +41,10 @@ def built(client, test_engine, world):
 
 
 def _begin(automation_id, world, tenant=TENANT):
-    return cascade.begin_delete(tenant, automation_id, ACTOR, deps_for(world).publisher)
+    admission = cascade.begin_delete(
+        tenant, automation_id, ACTOR, deps_for(world).publisher
+    )
+    return admission.automation
 
 
 def _assert_fully_deleted(test_engine, world, automation_id):
@@ -361,10 +364,14 @@ def test_delete_while_building_is_refused_with_no_side_effects(client, test_engi
 
 
 def test_repeated_admission_does_not_rewrite_actor_generation_or_revision(test_engine, world, built):
-    _begin(built, world)
-    again = cascade.begin_delete(TENANT, built, "someone-else@keep", deps_for(world).publisher)
-    assert again.updated_by == ACTOR
-    assert again.index_generation == 1
+    first = cascade.begin_delete(TENANT, built, ACTOR, deps_for(world).publisher)
+    again = cascade.begin_delete(
+        TENANT, built, "someone-else@keep", deps_for(world).publisher
+    )
+    assert first.started is True
+    assert again.started is False
+    assert again.automation.updated_by == ACTOR
+    assert again.automation.index_generation == 1
     assert [r.action for r in revisions(test_engine, built)].count("delete") == 1
     assert world.publishes == 1
 

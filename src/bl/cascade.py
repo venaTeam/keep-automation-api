@@ -20,7 +20,7 @@ is never deleted; rows, revisions, runs and script bytes persist forever.
 operation is delete-if-exists, so re-running one after a lost response or a lost
 checkpoint is harmless. Checkpoints advance with compare-and-set updates
 (`WHERE delete_cascade_step = <expected>`), so two runners on the same row — two
-API replicas, a repeated DELETE racing a resume — may repeat a step but can
+API replicas, the DELETE's attempt racing a reconciler resume — may repeat a step but can
 never move the checkpoint backward or skip one. No Python lock is involved.
 
 **Blocking I/O shape (ADR-008).** Every function here is synchronous and runs in
@@ -31,8 +31,13 @@ in a second short session. The adapters own their network timeouts.
 **Failure.** Any external or checkpoint failure stops the attempt at the last
 saved step; the automation stays `deleting`, never falsely `deleted`. The error
 is reported as a stable, sanitized code — exception messages are never logged or
-returned, since CAPP/registry errors can embed URLs or credentials. A repeated
-DELETE, `resume_delete` (D20's internal route), or E21's schedule continues it.
+returned, since CAPP/registry errors can embed URLs or credentials.
+
+**Who drives it.** Only the DELETE that moves the row to `deleting` starts an
+attempt (immediate teardown). Repeated DELETEs just report progress, so a UI
+that polls cannot pile up concurrent attempts against CAPP. Retrying a stopped
+cascade belongs to the reconciler: E21's CronJob → D20's internal route →
+`resume_delete` (spec §6.2).
 """
 import logging
 from dataclasses import dataclass
@@ -110,6 +115,19 @@ class CascadeResult:
         return self.matching_state == MatchingState.DELETED
 
 
+@dataclass(frozen=True)
+class DeleteAdmission:
+    """Result of `begin_delete`.
+
+    `started` is True only for the call that moved the row to `deleting`; that
+    caller launches the first cascade attempt. Every other call is a progress
+    read and must not start one.
+    """
+
+    automation: Automation
+    started: bool
+
+
 class CascadeStepError(Exception):
     def __init__(self, step: int, code: str, cause: BaseException | None = None):
         self.step = step
@@ -123,7 +141,7 @@ class CascadeStepError(Exception):
 
 def begin_delete(
     tenant_id: str, automation_id: UUID, actor: str, publisher: ReloadPublisher
-) -> Automation:
+) -> DeleteAdmission:
     """DELETE admission + cascade step 1, under the row lock shared with edits.
 
     Idempotent path first: an automation already `deleting`/`deleted` is
@@ -137,7 +155,7 @@ def begin_delete(
         automation = scoped_get(session, tenant_id, automation_id, for_update=True)
         if automation.matching_state in DELETION_STATES:
             session.expunge(automation)
-            return automation
+            return DeleteAdmission(automation=automation, started=False)
         if automation.build_state == BuildState.BUILDING:
             raise AutomationBuildingError()
 
@@ -160,7 +178,7 @@ def begin_delete(
         session.expunge(automation)
 
     publisher.publish_reload()
-    return automation
+    return DeleteAdmission(automation=automation, started=True)
 
 
 # --- runner ---------------------------------------------------------------
@@ -360,18 +378,18 @@ def run_cascade(automation_id: UUID, deps: CascadeDeps) -> CascadeResult:
 def resume_delete(automation_id: UUID, deps: CascadeDeps) -> CascadeResult:
     """Business logic behind D20's `POST /internal/automations/{id}/resume-delete`.
 
-    Internal and unscoped by tenant (the reconciler acts across tenants). Same
-    runner as a repeated user DELETE; every step is safe to repeat.
+    Internal and unscoped by tenant (the reconciler acts across tenants). The
+    only retry path for a stopped cascade; every step is safe to repeat.
     """
     return run_cascade(automation_id, deps)
 
 
 def run_cascade_in_background(automation_id: UUID, deps: CascadeDeps) -> None:
-    """One bounded background attempt started by DELETE. Never raises.
+    """The first cascade attempt, started by the admitting DELETE. Never raises.
 
     Opens its own sessions and loads by id — it never captures the request's
-    session. If this attempt dies with the process, the checkpoint is intact and
-    a repeated DELETE or `resume_delete` continues it.
+    session. If this attempt stops or dies with the process, the checkpoint is
+    intact and the reconciler's `resume_delete` continues it.
     """
     try:
         run_cascade(automation_id, deps)
@@ -393,7 +411,7 @@ class DeboardSummary:
     - `deleted`: the child reached `deleted` (including ones already deleted
       by an earlier pass that this pass finished).
     - `in_progress`: deletion was admitted (`deleting`) but this attempt stopped
-      at a checkpoint — a later call, repeated DELETE or resume continues it.
+      at a checkpoint — a later deboard call or `resume_delete` continues it.
     - `skipped_building`: refused by the build guard; untouched, never
       cancelled. A later call deletes it once its build settles.
     - `failed`: deletion could not even be admitted (unexpected error); the
@@ -420,8 +438,9 @@ def deboard_wallet(
     """Run the single-automation delete for every automation on a tenant's wallet.
 
     Spec §5.4: deboard is the same cascade fanned out — no separate cascade, no
-    deboard table; progress is read back from the child rows, so calling again
-    simply resumes. Scoped by tenant AND wallet (the `(tenant_id, namespace)`
+    deboard table; progress is read back from the child rows. Unlike a repeated
+    user DELETE, deboard is an explicit operator pass, so it runs the cascade for
+    children already `deleting` too: calling again resumes. Scoped by tenant AND wallet (the `(tenant_id, namespace)`
     index): two tenants can target the same wallet name, and deboarding one must
     never touch the other's automations. Unbounded on purpose — the authoring
     list's row limit must not silently leave automations behind.

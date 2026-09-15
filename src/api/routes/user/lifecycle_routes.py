@@ -80,21 +80,23 @@ async def delete_automation(
 ):
     """Start (or continue) the delete cascade; returns before any external call.
 
-    `202` + progress while deleting — a repeated DELETE reports progress and
-    launches another attempt, which is safe (compare-and-set checkpoints).
-    `200` once already deleted.
+    The DELETE that admits the deletion (`202`) starts the one background
+    attempt. A repeated DELETE only reports progress (`202` while deleting,
+    `200` once deleted) and starts nothing — a stopped cascade is resumed by
+    the reconciler (E21 → D20 → `cascade.resume_delete`), not by the UI.
     """
-    automation = await run_in_threadpool(
+    admission = await run_in_threadpool(
         cascade.begin_delete,
         entity.tenant_id,
         automation_id,
         entity.email,
         deps.publisher,
     )
-    if automation.matching_state == MatchingState.DELETED:
-        response.status_code = status.HTTP_200_OK
-    else:
+    automation = admission.automation
+    if admission.started:
         background_tasks.add_task(
             cascade.run_cascade_in_background, automation.id, deps
         )
+    elif automation.matching_state == MatchingState.DELETED:
+        response.status_code = status.HTTP_200_OK
     return LifecycleStatusOut.from_orm(automation).dict()

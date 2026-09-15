@@ -1,11 +1,12 @@
 """DELETE /automations/{id} + exposure-tier guarantees (D18, spec §8.1)."""
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi.routing import APIRoute
 from sqlalchemy import text
 
 from src.api.deps import get_capp_deletion_client, get_git_client, get_registry_client
+from src.bl import cascade
 from src.main import get_app
 from tests.conftest import OTHER_TENANT, TENANT
 from tests.fakes import World, deps_for, seed_external
@@ -65,24 +66,45 @@ def test_delete_already_deleted_returns_200(client, test_engine, world):
     assert len(world.calls) == calls
 
 
-def test_repeated_delete_resumes_a_stuck_cascade_and_keeps_first_actor(
-    client, client_as, test_engine, world
+def test_repeated_delete_reports_progress_and_starts_no_attempt(
+    client, client_as, test_engine, world, reload_publisher
 ):
+    """Polling with DELETE must not pile up cascade attempts against CAPP."""
     automation_id = create_built(client, test_engine)
     world.failures["delete_secret"] = 1
 
     first = client.delete(f"/automations/{automation_id}")
     assert first.status_code == 202
-    assert row(test_engine, automation_id).matching_state == "deleting"
     assert row(test_engine, automation_id).delete_cascade_step == 1
+    calls_after_first = list(world.calls)
 
-    again = client_as(TENANT).delete(f"/automations/{automation_id}")
+    for _ in range(3):
+        again = client_as(TENANT).delete(f"/automations/{automation_id}")
+        assert again.status_code == 202
+        assert again.json()["matching_state"] == "deleting"
+        assert again.json()["delete_cascade_step"] == 1
 
-    assert again.status_code == 202
-    assert again.json()["delete_cascade_step"] == 1  # progress at admission
-    assert row(test_engine, automation_id).matching_state == "deleted"
+    assert world.calls == calls_after_first  # no CAPP / registry / git calls
+    assert reload_publisher.count == 1
+    assert row(test_engine, automation_id).matching_state == "deleting"
     assert row(test_engine, automation_id).updated_by == "noauth@keep"
     assert [r.action for r in revisions(test_engine, automation_id)].count("delete") == 1
+
+
+def test_stopped_cascade_is_resumed_by_the_reconciler_path_not_delete(
+    client, test_engine, world
+):
+    automation_id = create_built(client, test_engine)
+    world.failures["delete_capp"] = 1
+    client.delete(f"/automations/{automation_id}")
+    assert row(test_engine, automation_id).matching_state == "deleting"
+
+    result = cascade.resume_delete(UUID(automation_id), deps_for(world))
+
+    assert result.completed
+    resp = client.delete(f"/automations/{automation_id}")
+    assert resp.status_code == 200
+    assert resp.json()["matching_state"] == "deleted"
 
 
 def test_delete_while_building_is_409_with_no_side_effects(client, test_engine, world, reload_publisher):

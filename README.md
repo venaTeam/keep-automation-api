@@ -96,8 +96,10 @@ completed step:
 5. DB: `deleted`.
 
 CAPP `404` is success. Any other failure parks the automation in `deleting` at
-its last checkpoint; a repeated DELETE or `cascade.resume_delete` (D20's
-internal route, E21's schedule) continues it. Checkpoints are compare-and-set,
+its last checkpoint. Only the DELETE that starts the deletion launches the
+cascade; repeated DELETEs just report progress, so polling cannot pile up
+attempts. `cascade.resume_delete` (D20's internal route, driven by E21's
+CronJob) continues a stopped cascade. Checkpoints are compare-and-set,
 so concurrent runners are safe. The team Secret named by `secret_name`, the row,
 revisions, runs and script bytes are never deleted.
 
@@ -121,7 +123,9 @@ and E21 re-drive gate), `lock_for_build_mutation` (D15 cutover fencing),
   access; do not mark deleted by hand.
 - `registry_inventory_not_empty`: an image was pushed after deletion began
   (late build, C2/C3) — resume once the push is done.
-- Resume: repeat `DELETE /automations/{id}` (same tenant).
+- Resume: `cascade.resume_delete(id, deps)` — D20's
+  `POST /internal/automations/{id}/resume-delete`, run by E21 every tick. A
+  repeated user DELETE does **not** resume.
 
 ## Run locally
 
