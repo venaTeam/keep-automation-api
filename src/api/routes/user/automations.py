@@ -19,7 +19,7 @@ design.
 """
 from uuid import UUID
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, status
 from fastapi.concurrency import run_in_threadpool
 
 from src.api.deps import get_authenticated_entity, get_git_client
@@ -39,7 +39,7 @@ def _detail(automation: Automation, script: str | None) -> dict:
     return out.dict()
 
 
-@router.get("/automations", status_code=200)
+@router.get("/automations", status_code=status.HTTP_200_OK)
 async def list_automations(
     namespace: str | None = None,
     matching_state: MatchingState | None = None,
@@ -58,7 +58,7 @@ async def list_automations(
     }
 
 
-@router.post("/automations", status_code=201)
+@router.post("/automations", status_code=status.HTTP_201_CREATED)
 async def create_automation(
     data: AutomationIn,
     entity: AuthenticatedEntity = Depends(get_authenticated_entity),
@@ -74,7 +74,7 @@ async def create_automation(
     return _detail(automation, data.script)
 
 
-@router.get("/automations/{automation_id}", status_code=200)
+@router.get("/automations/{automation_id}", status_code=status.HTTP_200_OK)
 async def get_automation(
     automation_id: UUID,
     entity: AuthenticatedEntity = Depends(get_authenticated_entity),
@@ -86,7 +86,7 @@ async def get_automation(
     return _detail(automation, script)
 
 
-@router.put("/automations/{automation_id}", status_code=200)
+@router.put("/automations/{automation_id}", status_code=status.HTTP_200_OK)
 async def update_automation(
     automation_id: UUID,
     data: AutomationIn,
@@ -104,13 +104,13 @@ async def update_automation(
     return _detail(automation, data.script)
 
 
-@router.get("/namespaces", status_code=200)
+@router.get("/namespaces", status_code=status.HTTP_200_OK)
 async def list_namespaces():
     # Stub until F25 (wallet onboarding) — see src/bl/namespaces.py.
     return {"namespaces": []}
 
 
-@router.get("/alert-schema/fields", status_code=200)
+@router.get("/alert-schema/fields", status_code=status.HTTP_200_OK)
 async def alert_schema_fields():
     """Allowlist for trigger/cooldown dropdowns (G28 renders from this, never hardcodes)."""
     return {

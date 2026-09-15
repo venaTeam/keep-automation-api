@@ -45,7 +45,7 @@ from sqlmodel import SQLModel
 
 import src.core.db as db_core
 import src.models.db  # noqa: F401  registers the automation tables on the metadata
-from src.api.deps import get_authenticated_entity
+from src.api.deps import get_authenticated_entity, get_reload_publisher
 from src.models.api.identity import AuthenticatedEntity
 from src.main import get_app
 
@@ -148,15 +148,57 @@ def clean_tables(test_engine):
     yield
 
 
+class RecordingReloadPublisher:
+    """Test double for the Redis `reload` publisher.
+
+    Snapshots the automation rows through the engine (a separate connection)
+    at publish time, so a test can prove the publish happened *after* commit:
+    an uncommitted transition would be invisible in the snapshot.
+    """
+
+    def __init__(self, engine):
+        self._engine = engine
+        self.snapshots: list[dict] = []
+
+    @property
+    def count(self) -> int:
+        return len(self.snapshots)
+
+    def publish_reload(self) -> None:
+        with self._engine.connect() as conn:
+            rows = conn.execute(
+                text("SELECT id, matching_state, index_generation FROM automations")
+            ).all()
+        self.snapshots.append(
+            {str(r.id): (r.matching_state, r.index_generation) for r in rows}
+        )
+
+
 @pytest.fixture()
-def client(test_engine):
+def reload_publisher(test_engine):
+    return RecordingReloadPublisher(test_engine)
+
+
+@pytest.fixture()
+def app_overrides(reload_publisher):
+    """Dependency overrides applied to every app the client fixtures build.
+
+    Tests never reach a real Redis even when REDIS_URL is set in the shell;
+    later fixtures add the cascade adapters to this same dict.
+    """
+    return {get_reload_publisher: lambda: reload_publisher}
+
+
+@pytest.fixture()
+def client(test_engine, app_overrides):
     app = get_app()
+    app.dependency_overrides.update(app_overrides)
     with TestClient(app) as test_client:
         yield test_client
 
 
 @pytest.fixture()
-def client_as(test_engine):
+def client_as(test_engine, app_overrides):
     """Factory for a client authenticated as an arbitrary tenant.
 
     The noauth shim hardcodes one tenant, so cross-tenant HTTP behaviour is only
@@ -167,6 +209,7 @@ def client_as(test_engine):
 
         def _make(tenant_id: str) -> TestClient:
             app = get_app()
+            app.dependency_overrides.update(app_overrides)
             # Returns the same type the real dependency does, so an override
             # cannot drift into a shape the routes no longer accept.
             app.dependency_overrides[get_authenticated_entity] = (

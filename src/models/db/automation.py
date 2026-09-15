@@ -41,6 +41,11 @@ class MatchingState(str, Enum):
     DELETED = "deleted"
 
 
+# The one-way end of the matching axis. Once here, no toggle, edit or build
+# cutover is admitted, and runs are attributed to the deletion (D18).
+DELETION_STATES = (MatchingState.DELETING, MatchingState.DELETED)
+
+
 class BuildState(str, Enum):
     IDLE = "idle"
     BUILDING = "building"

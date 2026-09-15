@@ -10,11 +10,17 @@ a reachable database (tests manage their own connections).
 from collections.abc import Iterator
 from contextlib import contextmanager
 
+from sqlalchemy import text
 from sqlalchemy.engine import Engine
 from sqlalchemy.engine.url import make_url
+from sqlalchemy.exc import OperationalError
 from sqlmodel import Session, create_engine
 
 from src import config
+from src.exceptions import AutomationBusyError
+
+# Postgres SQLSTATE for "lock_not_available" — raised when `lock_timeout` fires.
+_LOCK_NOT_AVAILABLE = "55P03"
 
 _engine: Engine | None = None
 
@@ -85,3 +91,21 @@ def check_database() -> None:
 def get_session() -> Iterator[Session]:
     with Session(get_engine()) as session:
         yield session
+
+
+def lock_first(session: Session, query):
+    """Run a `SELECT ... FOR UPDATE` with a bounded lock wait; first row or None.
+
+    `SET LOCAL` scopes the wait to this transaction only, so it cannot leak into
+    the pool. A lock held past `DB_LOCK_TIMEOUT_MS` raises AutomationBusyError
+    (503) instead of waiting into the statement timeout (a generic 500). The
+    session's transaction is aborted by the error; the caller's `with
+    get_session()` block exits and rolls it back.
+    """
+    session.execute(text(f"SET LOCAL lock_timeout = {int(config.DB_LOCK_TIMEOUT_MS)}"))
+    try:
+        return session.scalars(query.with_for_update()).first()
+    except OperationalError as exc:
+        if getattr(exc.orig, "pgcode", None) == _LOCK_NOT_AVAILABLE:
+            raise AutomationBusyError() from exc
+        raise
