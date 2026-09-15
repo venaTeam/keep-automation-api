@@ -7,6 +7,12 @@
 """
 from fastapi import Header
 
+from src.bl.cascade_adapters import (
+    CappDeletionClient,
+    RegistryClient,
+    get_default_capp_deletion_client,
+    get_default_registry_client,
+)
 from src.bl.git_client import GitClient, get_default_git_client
 from src.core.reload import ReloadPublisher, get_default_reload_publisher
 from src.models.api.identity import AuthenticatedEntity
@@ -20,6 +26,16 @@ def get_git_client() -> GitClient:
 def get_reload_publisher() -> ReloadPublisher:
     """Redis `reload` publisher; a no-op when REDIS_URL is unset."""
     return get_default_reload_publisher()
+
+
+def get_capp_deletion_client() -> CappDeletionClient:
+    """CAPP Capp/Secret deletion. Fails closed until D16's client is wired."""
+    return get_default_capp_deletion_client()
+
+
+def get_registry_client() -> RegistryClient:
+    """Registry image deletion. Fails closed until A0's credentials are wired."""
+    return get_default_registry_client()
 
 
 async def get_authenticated_entity() -> AuthenticatedEntity:
