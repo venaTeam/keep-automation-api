@@ -15,6 +15,7 @@ from fastapi.responses import JSONResponse
 from src import config
 from src.exceptions import (
     AutomationBuildingError,
+    AutomationLifecycleConflictError,
     AutomationNotFoundError,
     AutomationValidationError,
 )
@@ -114,6 +115,23 @@ def get_app() -> FastAPI:
             },
         )
 
+    @app.exception_handler(AutomationLifecycleConflictError)
+    async def automation_lifecycle_conflict_handler(
+        request: Request, exc: AutomationLifecycleConflictError
+    ) -> JSONResponse:
+        # Raised only after the tenant-scoped lookup succeeded, so the 409 never
+        # confirms another tenant's row exists.
+        return JSONResponse(
+            status_code=409,
+            content={
+                "detail": (
+                    "Automation is being deleted or was deleted; "
+                    "this transition is no longer allowed"
+                ),
+                "matching_state": exc.matching_state,
+            },
+        )
+
     # Health / root
     from src.api.routes.healthcheck import router as healthcheck_router
 
@@ -121,9 +139,11 @@ def get_app() -> FastAPI:
 
     # Tier: user-facing (existing identity/session)
     from src.api.routes.user.automations import router as automations_router
+    from src.api.routes.user.lifecycle_routes import router as lifecycle_router
     from src.api.routes.events import router as events_router
 
     app.include_router(automations_router, tags=["user"])
+    app.include_router(lifecycle_router, tags=["user"])
     app.include_router(events_router, tags=["user"])
 
     # Tier: machine (CI webhook — network-restricted)

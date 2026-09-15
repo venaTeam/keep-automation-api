@@ -8,12 +8,18 @@
 from fastapi import Header
 
 from src.bl.git_client import GitClient, get_default_git_client
+from src.core.reload import ReloadPublisher, get_default_reload_publisher
 from src.models.api.identity import AuthenticatedEntity
 
 
 def get_git_client() -> GitClient:
     """Script-repo client. In-memory stub until D14 lands the GitLab client."""
     return get_default_git_client()
+
+
+def get_reload_publisher() -> ReloadPublisher:
+    """Redis `reload` publisher; a no-op when REDIS_URL is unset."""
+    return get_default_reload_publisher()
 
 
 async def get_authenticated_entity() -> AuthenticatedEntity:

@@ -98,3 +98,18 @@ DB_POOL_TIMEOUT = int(os.environ.get("DATABASE_POOL_TIMEOUT", "10"))
 # CORS — comma-separated trusted browser origins.
 _cors_raw = os.environ.get("KEEP_CORS_TRUSTED_ORIGINS", "*")
 CORS_TRUSTED_ORIGINS = [o.strip() for o in _cors_raw.split(",") if o.strip()] or ["*"]
+
+# Redis — the pub/sub `reload` invalidation signal (automation-contracts.md
+# §"Redis keys" → Invalidation). Same variable names keep-event-handler reads
+# (src/config/consts.py), so one deploy setting points publisher and subscriber
+# at the same channel. Empty REDIS_URL disables publishing: the event-handler's
+# unconditional periodic reload still converges the index, only sub-second
+# propagation is lost (spec §6.1 #2).
+REDIS_URL = os.environ.get("REDIS_URL", "")
+AUTOMATION_RELOAD_CHANNEL = os.environ.get("AUTOMATION_RELOAD_CHANNEL", "reload")
+# Bounds connect + publish. A publish runs after a lifecycle commit on the
+# request path; a black-holed Redis must not turn enable/disable/delete into a
+# hung request. Failure is logged and swallowed — the transition is committed.
+REDIS_PUBLISH_TIMEOUT_SECONDS = float(
+    os.environ.get("REDIS_PUBLISH_TIMEOUT_SECONDS", "1.0")
+)

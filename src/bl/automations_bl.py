@@ -30,6 +30,7 @@ from src.bl.validation import validate_automation
 from src.core.db import get_session
 from src.exceptions import (
     AutomationBuildingError,
+    AutomationLifecycleConflictError,
     AutomationNotFoundError,
     AutomationValidationError,
 )
@@ -48,18 +49,25 @@ def _validated(data: AutomationIn) -> None:
         raise AutomationValidationError(errors)
 
 
-def _scoped_get(session, tenant_id: str, automation_id: UUID) -> Automation:
+def _scoped_get(
+    session, tenant_id: str, automation_id: UUID, for_update: bool = False
+) -> Automation:
     """Fetch one automation *within* a tenant, or raise not-found.
 
     Never `session.get(Automation, automation_id)`: a bare primary-key lookup
     cannot carry the tenant predicate, so it would return another tenant's row.
+
+    `for_update=True` takes the row lock that serializes admission between
+    edit/build, enable/disable and delete (D18): whichever transaction locks
+    first decides, the other re-reads the committed state.
     """
-    automation = session.scalars(
-        select(Automation).where(
-            Automation.id == automation_id,
-            Automation.tenant_id == tenant_id,
-        )
-    ).first()
+    query = select(Automation).where(
+        Automation.id == automation_id,
+        Automation.tenant_id == tenant_id,
+    )
+    if for_update:
+        query = query.with_for_update()
+    automation = session.scalars(query).first()
     if automation is None:
         raise AutomationNotFoundError()
     return automation
@@ -123,7 +131,12 @@ def update_automation(
     # session; a wasted validation on that path costs nothing.
     _validated(data)
     with get_session() as session:
-        automation = _scoped_get(session, tenant_id, automation_id)
+        automation = _scoped_get(session, tenant_id, automation_id, for_update=True)
+        # Lifecycle before build: a deleting/deleted row is never editable, and
+        # an edit would re-arm a build that recreates CAPP resources the
+        # cascade is tearing down (D18). Same row lock as DELETE admission.
+        if automation.matching_state in (MatchingState.DELETING, MatchingState.DELETED):
+            raise AutomationLifecycleConflictError(automation.matching_state.value)
         if automation.build_state == BuildState.BUILDING:
             raise AutomationBuildingError()
 

@@ -19,6 +19,7 @@ from fastapi.testclient import TestClient
 from src.contracts.validation_errors import ErrorCode, FieldError
 from src.exceptions import (
     AutomationBuildingError,
+    AutomationLifecycleConflictError,
     AutomationNotFoundError,
     AutomationValidationError,
 )
@@ -55,6 +56,10 @@ def raising_client(test_engine):
     async def _building():
         raise AutomationBuildingError()
 
+    @router.get("/_raises/lifecycle-conflict")
+    async def _lifecycle_conflict():
+        raise AutomationLifecycleConflictError("deleted")
+
     app.include_router(router)
     # The handlers must convert these into responses; if one is missing the
     # exception escapes as a 500 and TestClient re-raises it instead.
@@ -88,6 +93,12 @@ def test_building_becomes_409(raising_client):
     resp = raising_client.get("/_raises/building")
     assert resp.status_code == 409
     assert "mid-build" in resp.json()["detail"]
+
+
+def test_lifecycle_conflict_becomes_409(raising_client):
+    resp = raising_client.get("/_raises/lifecycle-conflict")
+    assert resp.status_code == 409
+    assert resp.json()["matching_state"] == "deleted"
 
 
 def test_every_route_declares_an_explicit_status_code():

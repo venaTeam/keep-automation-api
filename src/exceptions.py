@@ -15,4 +15,20 @@ class AutomationNotFoundError(Exception):
 
 
 class AutomationBuildingError(Exception):
-    """Edit rejected while build_state=building (mid-build submission lock)."""
+    """Edit/delete rejected while build_state=building (mid-build submission lock)."""
+
+
+class AutomationLifecycleConflictError(Exception):
+    """The requested transition is not allowed from the current matching state.
+
+    Enable/disable/edit on a `deleting`/`deleted` automation, or a cascade resume
+    on one that was never deleted (spec §5.3–5.4). A retry will not help — 409.
+    """
+
+    def __init__(self, matching_state: str):
+        self.matching_state = matching_state
+        super().__init__(f"transition not allowed from matching_state={matching_state}")
+
+
+class RunNotFoundError(Exception):
+    pass
