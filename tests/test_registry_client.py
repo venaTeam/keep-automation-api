@@ -3,6 +3,7 @@ import base64
 import io
 import json
 import traceback
+from http import HTTPStatus
 from urllib.error import HTTPError, URLError
 from urllib.request import Request
 from uuid import UUID
@@ -26,7 +27,7 @@ def listing(*names):
 
 
 class Response(io.BytesIO):
-    def __init__(self, payload=b"", status=200):
+    def __init__(self, payload=b"", status=HTTPStatus.OK):
         super().__init__(payload if isinstance(payload, bytes) else json.dumps(payload).encode())
         self.status = status
 
@@ -58,7 +59,7 @@ def client(opener, **overrides):
 
 def test_storage_listing_and_delete_use_distinct_endpoints_and_close_responses():
     inventory = Response(listing("sha256__old", "build-partial", "sha256__old"))
-    deleted = Response(status=204)
+    deleted = Response(status=HTTPStatus.NO_CONTENT)
     transport = Transport(inventory, deleted)
     registry = client(transport)
     entries = registry.list_image_entries(AUTOMATION_ID)
@@ -90,7 +91,7 @@ def test_partial_deletion_retry_converges_and_never_addresses_siblings():
             failed = True
             raise TimeoutError("transport token=secret-token")
         entries.discard(name)
-        return Response(status=204)
+        return Response(status=HTTPStatus.NO_CONTENT)
 
     registry = client(artifactory)
     with pytest.raises(RegistryError):
@@ -106,7 +107,9 @@ def test_partial_deletion_retry_converges_and_never_addresses_siblings():
 @pytest.mark.parametrize("method", ["list", "delete"])
 def test_404_is_idempotent_success_and_closes_error_response(method):
     body = io.BytesIO(b"absent")
-    error = HTTPError("https://redacted", 404, "absent", {}, body)
+    error = HTTPError(
+        "https://redacted", HTTPStatus.NOT_FOUND, "absent", {}, body
+    )
     registry = client(Transport(error))
     if method == "list":
         assert registry.list_image_entries(AUTOMATION_ID) == []
@@ -115,7 +118,18 @@ def test_404_is_idempotent_success_and_closes_error_response(method):
     assert body.closed
 
 
-@pytest.mark.parametrize("status", [301, 302, 401, 403, 429, 500, 503])
+@pytest.mark.parametrize(
+    "status",
+    [
+        HTTPStatus.MOVED_PERMANENTLY,
+        HTTPStatus.FOUND,
+        HTTPStatus.UNAUTHORIZED,
+        HTTPStatus.FORBIDDEN,
+        HTTPStatus.TOO_MANY_REQUESTS,
+        HTTPStatus.INTERNAL_SERVER_ERROR,
+        HTTPStatus.SERVICE_UNAVAILABLE,
+    ],
+)
 @pytest.mark.parametrize("method", ["list", "delete"])
 def test_http_failures_are_not_treated_as_absence(status, method):
     body = io.BytesIO(b"secret-token")
@@ -182,7 +196,10 @@ def test_inventory_read_is_bounded_and_oversize_fails_closed():
     assert response.closed
 
 
-@pytest.mark.parametrize("status", [200, 202, 301])
+@pytest.mark.parametrize(
+    "status",
+    [HTTPStatus.OK, HTTPStatus.ACCEPTED, HTTPStatus.MOVED_PERMANENTLY],
+)
 def test_delete_only_accepts_completed_deletion(status):
     with pytest.raises(RegistryError):
         client(Transport(Response(status=status))).delete_image(AUTOMATION_ID, "old-tag")
@@ -198,7 +215,12 @@ def test_basic_auth_uses_header_only():
 
 def test_redirect_handler_never_forwards_request():
     request = Request(BASE, headers={"Authorization": "Bearer secret-token"})
-    assert _NoRedirect().redirect_request(request, None, 302, "", {}, "https://other") is None
+    assert (
+        _NoRedirect().redirect_request(
+            request, None, HTTPStatus.FOUND, "", {}, "https://other"
+        )
+        is None
+    )
 
 
 @pytest.mark.parametrize("overrides", [

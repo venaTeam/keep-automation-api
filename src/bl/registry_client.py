@@ -14,6 +14,7 @@ import json
 import math
 import re
 from collections.abc import Callable
+from http import HTTPStatus
 from http.client import HTTPException, HTTPResponse
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit
@@ -110,7 +111,11 @@ class ArtifactoryRegistryClient:
         open_request = self._opener or build_opener(_NoRedirect()).open
         try:
             with open_request(request, timeout=self._timeout) as response:
-                expected_status = 200 if method == "GET" else 204
+                expected_status = (
+                    HTTPStatus.OK
+                    if method == "GET"
+                    else HTTPStatus.NO_CONTENT
+                )
                 if response.status != expected_status:
                     raise RegistryError("Unexpected Artifactory response status")
                 if method == "DELETE":
@@ -122,7 +127,7 @@ class ArtifactoryRegistryClient:
         except HTTPError as exc:
             status = exc.code
             exc.close()
-            if status == 404:
+            if status == HTTPStatus.NOT_FOUND:
                 return None
             raise RegistryError(f"Artifactory request failed with HTTP {status}") from None
         except (OSError, URLError, HTTPException, ValueError):
