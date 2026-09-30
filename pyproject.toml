@@ -18,6 +18,7 @@ sqlalchemy = "^2.0.14"
 # No alembic: the automation tables' migration lineage lives in
 # keep-api-gateway's Alembic (spec §4.4 — one `keep` database, one lineage).
 psycopg2-binary = "^2.9.9"
+redis = "^5.2.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3.0"

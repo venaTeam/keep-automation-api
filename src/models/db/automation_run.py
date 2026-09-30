@@ -39,6 +39,10 @@ class RunState(str, Enum):
 class SuppressionReason(str, Enum):
     DUPLICATE = "duplicate"
     COOLDOWN = "cooldown"
+    # Never invoked because the automation was no longer `active` at submit
+    # re-check or when a deletion finalized it (keep-migrations revision
+    # `automation_suppression_reason_inactive`).
+    INACTIVE = "inactive"
 
 
 class FailureClass(str, Enum):

@@ -5,9 +5,13 @@ Control-plane API for the Keep **Automations** feature — a **dedicated service
 tables, the CI webhook, SSE to the UI, git commits, and CAPP deploy/rollouts, and
 custodies the single CAPP service identity.
 
-> **Status: authoring CRUD.** The FastAPI shell, the three exposure-tier routers
-> and the authoring CRUD endpoints are in place; submit, the CI webhook, the
-> reconciler and SSE payloads are still stubs (D14–D20).
+> **Status: authoring CRUD + lifecycle orchestration; integration pending.**
+> The FastAPI shell, the three exposure-tier routers, authoring CRUD,
+> enable/disable and the delete cascade
+> are in place; submit, the CI webhook, the reconciler and SSE payloads are still
+> stubs (D14–D17, D19–D20). The cascade's CAPP adapter remains a D16
+> dependency; the D18 Artifactory adapter uses A0 configuration and fails closed
+> when that configuration is absent — see "Lifecycle" below.
 
 ## Database
 
@@ -70,6 +74,103 @@ Auth is driven by the **existing identity provider** — never a second auth sta
 (§10.2). A minimal noauth shim stands in until the shared identity manager is
 vendored.
 
+## Authoring writes and git (D14-ready)
+
+Git I/O never runs inside a DB transaction or under a row lock:
+
+- **Create** commits the script to git first, then inserts the row + revision
+  in one short transaction (`building`, `building_sha`, `build_lock_deadline`).
+- **Edit** claims `build_state=building` in a short row-locked transaction,
+  commits to git with no session open, then writes the definition,
+  `building_sha` and revision in a second short transaction — only if the claim
+  (fenced by its deadline) is still its own; otherwise `409`. A git failure
+  restores the previous build state.
+- Every row-lock acquisition waits at most `DATABASE_LOCK_TIMEOUT_MS` (2000);
+  past that the request is `503` + `Retry-After: 1`, never a statement-timeout
+  500. Code that later adds CAPP/git calls (D15/D16) must keep this shape:
+  claim, call with no session, finish.
+
+## Lifecycle (D18)
+
+| Endpoint | Behaviour |
+|---|---|
+| `POST /automations/{id}/enable` | `matching_state=active`. `400 active_digest_required` if never built. |
+| `POST /automations/{id}/disable` | `matching_state=inactive`. Matching only — CAPP is not touched, in-flight runs finish. |
+| `DELETE /automations/{id}` | `409` while `building`. Otherwise `202` + progress and the cascade runs in the background; `200` once `deleted`. |
+
+Enable/disable bump `index_generation`, write an `automation_revisions` row and
+publish the Redis `reload` signal **after commit**. Toggles and edits on a
+`deleting`/`deleted` automation return `409`.
+
+**Delete cascade** (`src/bl/cascade.py`) — `delete_cascade_step` is the last
+completed step:
+
+1. DB: `deleting`, generation bump, delete revision, publish `reload`.
+2. CAPP: delete Capp `capp_deployment_id` (or `automation-{id}`) → delete the
+   Keep-owned run-auth Secret `automation-{id}-run-auth` → clear the encrypted
+   DB key in the checkpoint-2 transaction (column pending D16/F24).
+3. Registry: delete every image under the automation's own path.
+4. Git: archive-mark `{id}/.archived` (script bytes kept).
+5. DB: `deleted`.
+
+CAPP `404` is success. Any other failure parks the automation in `deleting` at
+its last checkpoint. Only the DELETE that starts the deletion launches the
+cascade; repeated DELETEs just report progress, so polling cannot pile up
+attempts. `cascade.resume_delete` (D20's internal route, driven by E21's
+CronJob) continues a stopped cascade. Checkpoints are compare-and-set,
+so concurrent runners are safe. The team Secret named by `secret_name`, the row,
+revisions, runs and script bytes are never deleted.
+
+**Adapters.** `CappDeletionClient` is the narrow cascade interface that D16's
+general CAPP client must implement. `ArtifactoryRegistryClient` enumerates and
+deletes all artifacts below the automation's configured image path; it uses A0's
+Artifactory URL, repository, prefix, and credentials. Missing configuration
+fails closed, so a DELETE never reports resources removed when they were not.
+Git archive uses the in-memory `GitClient` until D14.
+
+Registry deployment settings (supplied by A0, path agreed with F23):
+
+- `ARTIFACTORY_URL`: HTTPS service URL including its context path, e.g.
+  `https://registry.example/artifactory`.
+- `ARTIFACTORY_REPOSITORY`: local Docker repository; do not use a virtual repository.
+- `ARTIFACTORY_IMAGE_PREFIX`: explicit path used by CI, e.g. `automations`.
+  All versions/build artifacts must be under `{prefix}/{automation_id}`; the
+  shared golden base must be outside that directory. There is no assumed prefix.
+- Inject `ARTIFACTORY_TOKEN` OR both `ARTIFACTORY_USERNAME` and
+  `ARTIFACTORY_PASSWORD` from deployment secrets. The identity needs read/delete
+  permissions on the automation paths.
+- `ARTIFACTORY_TIMEOUT_SECONDS`: positive per-socket timeout (default 10 seconds).
+
+The adapter uses [Folder Info](https://docs.jfrog.com/artifactory/reference/getstorageitem)
+to enumerate immediate entries, then [Delete Item](https://docs.jfrog.com/artifactory/reference/deleteitem)
+to remove each version directory or partial artifact. Responses and HTTP errors
+are closed, redirects are refused, and malformed/oversized inventories stop
+cleanup instead of counting as empty. A final inventory check gates checkpoint 3.
+Tests cover the HTTP contract with simulated responses; a dev Artifactory
+round-trip with the provisioned credentials remains an integration acceptance check.
+
+**For other stories:** `run_finalization.finalize_terminated_by_deletion`
+(D17/D20 — deletion-killed runs, no team notice), `deletion_started` (D17 retry
+and E21 re-drive gate), `lock_for_build_mutation` (D15 cutover fencing),
+`cascade.deboard_wallet(tenant_id, wallet, actor, deps)` (F25/ops — no route).
+
+Never-invoked runs of a deleting/deleted automation are finalized `suppressed`
+with `suppression_reason=inactive`. That enum value needs keep-migrations revision
+`automation_suppression_reason_inactive` applied **before** this service deploys.
+
+### Runbook: stuck deletion
+
+- Row `matching_state=deleting`, `delete_cascade_step` not advancing → log line
+  `delete cascade for <id> stopped at step N: <code> (<ExceptionType>)`.
+- `capp_delete_failed` / `run_auth_secret_delete_failed` with `Forbidden`: our
+  CAPP identity lost Secret/Capp delete permission on the wallet — restore
+  access; do not mark deleted by hand.
+- `registry_inventory_not_empty`: an image was pushed after deletion began
+  (late build, C2/C3) — resume once the push is done.
+- Resume: `cascade.resume_delete(id, deps)` — D20's
+  `POST /internal/automations/{id}/resume-delete`, run by E21 every tick. A
+  repeated user DELETE does **not** resume.
+
 ## Run locally
 
 ```bash
@@ -89,6 +190,7 @@ stand-in — see the note at the top of `tests/conftest.py`.
 
 ## Deferred
 
-- Business endpoints (submit, reconciler, CI webhook, runs, SSE payloads) — **D14–D20**.
+- Business endpoints (submit, reconciler, CI webhook, runs, SSE payloads) — **D14–D17, D19–D20**.
+- Real CAPP deletion client + run-auth key column (**D16/F24**), A0 Artifactory deployment configuration, and git archive adapter (**D14**).
 - Deploy + NetworkPolicy manifests — handled out-of-repo (A0 infra).
 - Real identity-provider integration + tier token verification.

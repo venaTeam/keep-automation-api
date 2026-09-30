@@ -204,7 +204,8 @@
         {
           "enum_values": [
             "duplicate",
-            "cooldown"
+            "cooldown",
+            "inactive"
           ],
           "name": "suppression_reason",
           "nullable": true,
