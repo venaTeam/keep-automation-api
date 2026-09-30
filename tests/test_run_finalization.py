@@ -127,6 +127,31 @@ def test_pending_never_invoked_run_is_suppressed_not_deletion_killed(
     assert stored.suppression_reason == "inactive"
 
 
+def test_pending_to_submitted_race_is_classified_as_termination(
+    monkeypatch, test_engine, world, automation_id
+):
+    run_id = _insert_run(automation_id, state=RunState.PENDING, attempts=None)
+    _delete(automation_id, world)
+    real_complete = run_finalization.complete_run_if_open
+    raced = {"done": False}
+
+    def advance_then_retry(run_id_arg, *, expected_state=None, **values):
+        if expected_state == RunState.PENDING and not raced["done"]:
+            raced["done"] = True
+            with test_engine.begin() as conn:
+                conn.execute(
+                    text("UPDATE automation_runs SET state = 'submitted' WHERE run_id = :id"),
+                    {"id": str(run_id)},
+                )
+        return real_complete(run_id_arg, expected_state=expected_state, **values)
+
+    monkeypatch.setattr(run_finalization, "complete_run_if_open", advance_then_retry)
+    run = run_finalization.finalize_terminated_by_deletion(run_id)
+    assert run.state == RunState.FAILED
+    assert run.failure_class == "terminated_by_deletion"
+    assert _run_row(test_engine, run_id).suppression_reason is None
+
+
 def test_run_of_live_automation_is_not_attributed_to_deletion(test_engine, automation_id):
     run_id = _insert_run(automation_id)
     with pytest.raises(AutomationLifecycleConflictError):

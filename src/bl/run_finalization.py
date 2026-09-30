@@ -58,20 +58,23 @@ def deletion_started(automation_id: UUID) -> bool:
     return _matching_state(automation_id) in DELETION_STATES
 
 
-def complete_run_if_open(run_id: UUID, **values) -> bool:
+def complete_run_if_open(
+    run_id: UUID, *, expected_state: RunState | None = None, **values
+) -> bool:
     """Write a terminal outcome only if the run is still pending/submitted.
 
-    Returns False when a terminal outcome was already committed — the caller
-    must then read the row rather than report its own result.
+    With expected_state, also require that exact open state. Returns False
+    when the row advanced; callers must re-read rather than report their result.
     """
     with get_session() as session:
+        statement = update(AutomationRun).where(
+            AutomationRun.run_id == run_id,
+            AutomationRun.state.in_(OPEN_RUN_STATES),
+        )
+        if expected_state is not None:
+            statement = statement.where(AutomationRun.state == expected_state)
         result = session.execute(
-            update(AutomationRun)
-            .where(
-                AutomationRun.run_id == run_id,
-                AutomationRun.state.in_(OPEN_RUN_STATES),
-            )
-            .values(finished_at=func.now(), **values)
+            statement.values(finished_at=func.now(), **values)
             .execution_options(synchronize_session=False)
         )
         session.commit()
@@ -111,18 +114,33 @@ def finalize_terminated_by_deletion(run_id: UUID) -> AutomationRun:
     if state not in DELETION_STATES:
         raise AutomationLifecycleConflictError(state.value)
 
-    if run.state == RunState.SUBMITTED:
-        complete_run_if_open(
-            run_id,
-            state=RunState.FAILED,
-            failure_class=FailureClass.TERMINATED_BY_DELETION,
-        )
-    else:
-        complete_run_if_open(
-            run_id,
-            state=RunState.SUPPRESSED,
-            suppression_reason=SuppressionReason.INACTIVE,
-        )
+    # The row may advance from pending to submitted after the first read. Use
+    # an expected-state compare-and-set, then classify the freshly-read state;
+    # never suppress a call that another worker has already started. At most
+    # two attempts are needed: pending can only advance to submitted/terminal,
+    # and submitted can only advance to terminal.
+    expected_state = run.state
+    for _ in range(2):
+        if expected_state == RunState.SUBMITTED:
+            changed = complete_run_if_open(
+                run_id,
+                expected_state=expected_state,
+                state=RunState.FAILED,
+                failure_class=FailureClass.TERMINATED_BY_DELETION,
+            )
+        else:
+            changed = complete_run_if_open(
+                run_id,
+                expected_state=expected_state,
+                state=RunState.SUPPRESSED,
+                suppression_reason=SuppressionReason.INACTIVE,
+            )
+        if changed:
+            break
+        current = _load_run(run_id)
+        if current.state not in OPEN_RUN_STATES:
+            return current
+        expected_state = current.state
     return _load_run(run_id)
 
 
