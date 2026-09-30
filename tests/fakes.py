@@ -60,7 +60,7 @@ class FakeRegistry:
     def __init__(self, world: World):
         self.world = world
 
-    def list_image_digests(self, automation_id: UUID) -> list[str]:
+    def list_image_entries(self, automation_id: UUID) -> list[str]:
         self.world.calls.append(("list_images", str(automation_id)))
         self.world.maybe_fail("list_images")
         return sorted(self.world.images.get(str(automation_id), set()))

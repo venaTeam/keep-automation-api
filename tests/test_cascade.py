@@ -224,8 +224,8 @@ def test_partial_registry_deletion_repeats_safely(test_engine, world, built):
             self.inner = inner
             self.deleted = 0
 
-        def list_image_digests(self, automation_id):
-            return self.inner.list_image_digests(automation_id)
+        def list_image_entries(self, automation_id):
+            return self.inner.list_image_entries(automation_id)
 
         def delete_image(self, automation_id, digest):
             if self.deleted == 1:
@@ -252,8 +252,8 @@ def test_registry_not_advanced_while_inventory_non_empty(test_engine, world, bui
     deps = deps_for(world)
 
     class LatePush:
-        def list_image_digests(self, automation_id):
-            return deps.registry.list_image_digests(automation_id)
+        def list_image_entries(self, automation_id):
+            return deps.registry.list_image_entries(automation_id)
 
         def delete_image(self, automation_id, digest):
             deps.registry.delete_image(automation_id, digest)

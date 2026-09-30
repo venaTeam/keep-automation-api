@@ -288,21 +288,21 @@ def _step_delete_capp_resources(automation: Automation, deps: CascadeDeps) -> No
 def _step_delete_images(automation: Automation, deps: CascadeDeps) -> None:
     step = STEP_IMAGES_DELETED
     try:
-        digests = list(deps.registry.list_image_digests(automation.id))
+        entries = deps.registry.list_image_entries(automation.id)
     except Exception as exc:  # noqa: BLE001
         raise CascadeStepError(step, "registry_list_failed", exc) from exc
-    for digest in digests:
+    for entry in entries:
         _external(
             step,
             "registry_delete_failed",
             deps.registry.delete_image,
             automation.id,
-            digest,
+            entry,
         )
     # Advance only on an empty inventory: a digest pushed while we deleted (a
     # late build, C2/C3) must not be left behind under a "done" checkpoint.
     try:
-        remaining = list(deps.registry.list_image_digests(automation.id))
+        remaining = deps.registry.list_image_entries(automation.id)
     except Exception as exc:  # noqa: BLE001
         raise CascadeStepError(step, "registry_list_failed", exc) from exc
     if remaining:

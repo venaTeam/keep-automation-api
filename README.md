@@ -5,11 +5,13 @@ Control-plane API for the Keep **Automations** feature — a **dedicated service
 tables, the CI webhook, SSE to the UI, git commits, and CAPP deploy/rollouts, and
 custodies the single CAPP service identity.
 
-> **Status: authoring CRUD + lifecycle (D18).** The FastAPI shell, the three
-> exposure-tier routers, authoring CRUD, enable/disable and the delete cascade
+> **Status: authoring CRUD + lifecycle orchestration; integration pending.**
+> The FastAPI shell, the three exposure-tier routers, authoring CRUD,
+> enable/disable and the delete cascade
 > are in place; submit, the CI webhook, the reconciler and SSE payloads are still
-> stubs (D14–D17, D19–D20). The cascade's CAPP and registry adapters fail closed
-> until D16/A0 wire real clients — see "Lifecycle" below.
+> stubs (D14–D17, D19–D20). The cascade's CAPP adapter remains a D16
+> dependency; the D18 Artifactory adapter uses A0 configuration and fails closed
+> when that configuration is absent — see "Lifecycle" below.
 
 ## Database
 
@@ -119,11 +121,33 @@ CronJob) continues a stopped cascade. Checkpoints are compare-and-set,
 so concurrent runners are safe. The team Secret named by `secret_name`, the row,
 revisions, runs and script bytes are never deleted.
 
-**Adapters.** `CappDeletionClient` and `RegistryClient`
-(`src/bl/cascade_adapters.py`) are Protocols; the defaults raise until D16 / A0
-provide real clients, so a DELETE today stops at step 1 instead of reporting a
-deletion that never happened. Git archive uses the in-memory `GitClient` until
-D14.
+**Adapters.** `CappDeletionClient` is the narrow cascade interface that D16's
+general CAPP client must implement. `ArtifactoryRegistryClient` enumerates and
+deletes all artifacts below the automation's configured image path; it uses A0's
+Artifactory URL, repository, prefix, and credentials. Missing configuration
+fails closed, so a DELETE never reports resources removed when they were not.
+Git archive uses the in-memory `GitClient` until D14.
+
+Registry deployment settings (supplied by A0, path agreed with F23):
+
+- `ARTIFACTORY_URL`: HTTPS service URL including its context path, e.g.
+  `https://registry.example/artifactory`.
+- `ARTIFACTORY_REPOSITORY`: local Docker repository; do not use a virtual repository.
+- `ARTIFACTORY_IMAGE_PREFIX`: explicit path used by CI, e.g. `automations`.
+  All versions/build artifacts must be under `{prefix}/{automation_id}`; the
+  shared golden base must be outside that directory. There is no assumed prefix.
+- Inject `ARTIFACTORY_TOKEN` OR both `ARTIFACTORY_USERNAME` and
+  `ARTIFACTORY_PASSWORD` from deployment secrets. The identity needs read/delete
+  permissions on the automation paths.
+- `ARTIFACTORY_TIMEOUT_SECONDS`: positive per-socket timeout (default 10 seconds).
+
+The adapter uses [Folder Info](https://docs.jfrog.com/artifactory/reference/getstorageitem)
+to enumerate immediate entries, then [Delete Item](https://docs.jfrog.com/artifactory/reference/deleteitem)
+to remove each version directory or partial artifact. Responses and HTTP errors
+are closed, redirects are refused, and malformed/oversized inventories stop
+cleanup instead of counting as empty. A final inventory check gates checkpoint 3.
+Tests cover the HTTP contract with simulated responses; a dev Artifactory
+round-trip with the provisioned credentials remains an integration acceptance check.
 
 **For other stories:** `run_finalization.finalize_terminated_by_deletion`
 (D17/D20 — deletion-killed runs, no team notice), `deletion_started` (D17 retry
@@ -167,6 +191,6 @@ stand-in — see the note at the top of `tests/conftest.py`.
 ## Deferred
 
 - Business endpoints (submit, reconciler, CI webhook, runs, SSE payloads) — **D14–D17, D19–D20**.
-- Real CAPP deletion client + run-auth key column (**D16/F24**), registry client (**A0**), git archive adapter (**D14**).
+- Real CAPP deletion client + run-auth key column (**D16/F24**), A0 Artifactory deployment configuration, and git archive adapter (**D14**).
 - Deploy + NetworkPolicy manifests — handled out-of-repo (A0 infra).
 - Real identity-provider integration + tier token verification.

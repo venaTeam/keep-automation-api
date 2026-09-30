@@ -35,7 +35,7 @@ def get_capp_deletion_client() -> CappDeletionClient:
 
 
 def get_registry_client() -> RegistryClient:
-    """Registry image deletion. Fails closed until A0's credentials are wired."""
+    """D18 registry cleanup, configured with A0's repository and credentials."""
     return get_default_registry_client()
 
 

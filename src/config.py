@@ -127,3 +127,16 @@ DB_LOCK_TIMEOUT_MS = int(os.environ.get("DATABASE_LOCK_TIMEOUT_MS", "2000"))
 BUILD_LOCK_TIMEOUT_SECONDS = int(
     os.environ.get("AUTOMATION_BUILD_LOCK_TIMEOUT_SECONDS", "1800")
 )
+
+# Artifactory registry cleanup (A0 supplies these deployment values). The
+# image prefix is the path below the repository containing only automation
+# images; the adapter appends the automation UUID and never walks outside it.
+ARTIFACTORY_URL = os.environ.get("ARTIFACTORY_URL", "")
+ARTIFACTORY_REPOSITORY = os.environ.get("ARTIFACTORY_REPOSITORY", "")
+ARTIFACTORY_IMAGE_PREFIX = os.environ.get("ARTIFACTORY_IMAGE_PREFIX", "")
+ARTIFACTORY_TOKEN = os.environ.get("ARTIFACTORY_TOKEN", "")
+ARTIFACTORY_USERNAME = os.environ.get("ARTIFACTORY_USERNAME", "")
+ARTIFACTORY_PASSWORD = os.environ.get("ARTIFACTORY_PASSWORD", "")
+ARTIFACTORY_TIMEOUT_SECONDS = float(
+    os.environ.get("ARTIFACTORY_TIMEOUT_SECONDS", "10")
+)
