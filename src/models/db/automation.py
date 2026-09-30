@@ -2,9 +2,9 @@
 
 Lives in the **`keep` database, `public` schema** — the same database as `alert`,
 `incident` and `tenant` — so `tenant_id` can be a real FK (Postgres has no
-cross-database foreign keys). Migrations for this table live in
-**keep-api-gateway's Alembic**, the single lineage for that database; this repo
-owns the model, not the lineage.
+cross-database foreign keys). Migrations for this table live in the
+**keep-migrations** repo, the single lineage for that database; this repo owns
+the model, not the lineage.
 
 Written exclusively by this service. That is a **code-level convention**, not a
 database guarantee: keep-event-handler reads these tables over the shared engine
