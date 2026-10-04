@@ -16,3 +16,10 @@ class AutomationNotFoundError(Exception):
 
 class AutomationBuildingError(Exception):
     """Edit rejected while build_state=building (mid-build submission lock)."""
+
+
+class ScriptRepoUnavailableError(Exception):
+    """The script repository (GitLab) could not be reached or returned an error
+    — a timeout, a connection failure, or a non-404 API error. Mapped to a 503
+    so the caller can retry; the DB transaction never committed, so there is no
+    orphan automation row to reconcile."""

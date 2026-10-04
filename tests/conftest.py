@@ -45,7 +45,8 @@ from sqlmodel import SQLModel
 
 import src.core.db as db_core
 import src.models.db  # noqa: F401  registers the automation tables on the metadata
-from src.api.deps import get_authenticated_entity
+from src.api.deps import get_authenticated_entity, get_git_client
+from src.bl.git_client import InMemoryGitClient
 from src.models.api.identity import AuthenticatedEntity
 from src.main import get_app
 
@@ -151,6 +152,12 @@ def clean_tables(test_engine):
 @pytest.fixture()
 def client(test_engine):
     app = get_app()
+    # Production get_git_client fails fast without GitLab config; HTTP tests run
+    # against an in-memory stub injected through the same seam the real identity
+    # manager-era wiring will use. One stub per app so POST-then-GET read-back
+    # within a test sees the committed bytes.
+    stub = InMemoryGitClient()
+    app.dependency_overrides[get_git_client] = lambda: stub
     with TestClient(app) as test_client:
         yield test_client
 
@@ -174,6 +181,10 @@ def client_as(test_engine):
                     tenant_id=tenant_id, email=f"author@{tenant_id}"
                 )
             )
+            # Stub the script repo (see `client`): the real client fails fast
+            # without GitLab config and these tests never touch a real repo.
+            stub = InMemoryGitClient()
+            app.dependency_overrides[get_git_client] = lambda: stub
             return stack.enter_context(TestClient(app))
 
         yield _make
