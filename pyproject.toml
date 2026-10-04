@@ -18,6 +18,9 @@ sqlalchemy = "^2.0.14"
 # No alembic: the automation tables' migration lineage lives in
 # keep-api-gateway's Alembic (spec §4.4 — one `keep` database, one lineage).
 psycopg2-binary = "^2.9.9"
+# Script-repo client (D14): talks to keep-automation-scripts over the GitLab
+# REST API — stateless, no local checkout, no git binary in the image.
+python-gitlab = "^5.6.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3.0"

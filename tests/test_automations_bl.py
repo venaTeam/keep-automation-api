@@ -8,6 +8,7 @@ from src.bl.git_client import InMemoryGitClient
 from src.exceptions import (
     AutomationBuildingError,
     AutomationNotFoundError,
+    AutomationStateConflictError,
     AutomationValidationError,
 )
 from src.models.api.automation import AutomationIn
@@ -177,6 +178,156 @@ def test_list_filters(test_engine):
 
 def test_list_is_bounded():
     assert automations_bl.LIST_LIMIT == 1000
+
+
+# --- enable / disable / delete lifecycle --------------------------------
+
+
+def _revision_actions(engine, automation_id):
+    with engine.connect() as conn:
+        return [
+            r[0]
+            for r in conn.execute(
+                text(
+                    "SELECT action FROM automation_revisions "
+                    "WHERE automation_id = :id ORDER BY created_at"
+                ),
+                {"id": str(automation_id)},
+            ).all()
+        ]
+
+
+def _engine_now():
+    # The BL reaches the DB through the injected module global; tests that need
+    # a raw connection use the same engine the test_engine fixture installed.
+    import src.core.db as db_core
+
+    return db_core._engine
+
+
+def _built(git):
+    """A created automation with the build lock cleared (as the D15 webhook would)."""
+    a = automations_bl.create_automation(
+        TENANT, AutomationIn(**VALID), actor="alice@keep", git=git
+    )
+    with _engine_now().begin() as conn:
+        conn.execute(
+            text("UPDATE automations SET build_state = 'idle' WHERE id = :id"),
+            {"id": str(a.id)},
+        )
+    return a
+
+
+def test_enable_activates_and_records_revision(test_engine):
+    git = InMemoryGitClient()
+    a = _built(git)
+    enabled = automations_bl.enable_automation(TENANT, a.id, actor="bob@keep")
+    assert enabled.matching_state == MatchingState.ACTIVE
+    assert enabled.updated_by == "bob@keep"
+    assert _revision_actions(test_engine, a.id) == ["create", "enable"]
+    with test_engine.connect() as conn:
+        sha = conn.execute(
+            text(
+                "SELECT git_sha FROM automation_revisions WHERE action = 'enable'"
+            )
+        ).scalar()
+    assert sha is None  # lifecycle actions commit no script bytes
+
+
+def test_enable_rejected_while_building(test_engine):
+    git = InMemoryGitClient()
+    a = automations_bl.create_automation(
+        TENANT, AutomationIn(**VALID), actor="alice@keep", git=git
+    )  # stays build_state=building
+    with pytest.raises(AutomationBuildingError):
+        automations_bl.enable_automation(TENANT, a.id, actor="bob@keep")
+
+
+def test_enable_rejected_when_build_failed(test_engine):
+    git = InMemoryGitClient()
+    a = automations_bl.create_automation(
+        TENANT, AutomationIn(**VALID), actor="alice@keep", git=git
+    )
+    with test_engine.begin() as conn:
+        conn.execute(text("UPDATE automations SET build_state = 'build_failed'"))
+    with pytest.raises(AutomationStateConflictError):
+        automations_bl.enable_automation(TENANT, a.id, actor="bob@keep")
+
+
+def test_enable_is_idempotent(test_engine):
+    git = InMemoryGitClient()
+    a = _built(git)
+    automations_bl.enable_automation(TENANT, a.id, actor="bob@keep")
+    again = automations_bl.enable_automation(TENANT, a.id, actor="carol@keep")
+    assert again.matching_state == MatchingState.ACTIVE
+    # No second enable revision, and updated_by not churned by the no-op.
+    assert _revision_actions(test_engine, a.id) == ["create", "enable"]
+    assert again.updated_by == "bob@keep"
+
+
+def test_disable_deactivates_and_records_revision(test_engine):
+    git = InMemoryGitClient()
+    a = _built(git)
+    automations_bl.enable_automation(TENANT, a.id, actor="bob@keep")
+    disabled = automations_bl.disable_automation(TENANT, a.id, actor="carol@keep")
+    assert disabled.matching_state == MatchingState.INACTIVE
+    assert _revision_actions(test_engine, a.id) == ["create", "enable", "disable"]
+
+
+def test_disable_is_idempotent_when_inactive(test_engine):
+    git = InMemoryGitClient()
+    a = _built(git)  # inactive
+    automations_bl.disable_automation(TENANT, a.id, actor="bob@keep")
+    assert _revision_actions(test_engine, a.id) == ["create"]  # no-op, no revision
+
+
+def test_delete_archives_and_records_revision(test_engine):
+    git = InMemoryGitClient()
+    a = automations_bl.create_automation(
+        TENANT, AutomationIn(**VALID), actor="alice@keep", git=git
+    )  # building — delete is allowed regardless
+    deleted = automations_bl.delete_automation(TENANT, a.id, actor="bob@keep")
+    assert deleted.matching_state == MatchingState.DELETING
+    assert _revision_actions(test_engine, a.id) == ["create", "delete"]
+    # Archive-mark, never erase: the row still exists.
+    assert row_counts(test_engine)[0] == 1
+
+
+def test_delete_is_idempotent(test_engine):
+    git = InMemoryGitClient()
+    a = _built(git)
+    automations_bl.delete_automation(TENANT, a.id, actor="bob@keep")
+    automations_bl.delete_automation(TENANT, a.id, actor="carol@keep")
+    assert _revision_actions(test_engine, a.id) == ["create", "delete"]
+
+
+def test_enable_rejected_when_archived(test_engine):
+    git = InMemoryGitClient()
+    a = _built(git)
+    automations_bl.delete_automation(TENANT, a.id, actor="bob@keep")
+    with pytest.raises(AutomationStateConflictError):
+        automations_bl.enable_automation(TENANT, a.id, actor="bob@keep")
+
+
+def test_lifecycle_actions_are_tenant_scoped(test_engine):
+    git = InMemoryGitClient()
+    theirs = automations_bl.create_automation(
+        OTHER_TENANT, AutomationIn(**VALID), actor="a@keep", git=git
+    )
+    for action in (
+        automations_bl.enable_automation,
+        automations_bl.disable_automation,
+        automations_bl.delete_automation,
+    ):
+        with pytest.raises(AutomationNotFoundError):
+            action(TENANT, theirs.id, actor="attacker@keep")
+    # The other tenant's row is untouched.
+    with test_engine.connect() as conn:
+        state = conn.execute(
+            text("SELECT matching_state FROM automations WHERE id = :id"),
+            {"id": str(theirs.id)},
+        ).scalar()
+    assert state == "inactive"
 
 
 # --- tenant isolation ---------------------------------------------------

@@ -6,10 +6,11 @@ result. Domain exceptions are NOT caught here — `src/main.py` registers one
 handler per exception, so the status and body for a failure live in a single
 place and a new route cannot forget a branch:
 
-- AutomationValidationError -> 400 with the accumulating machine-readable
+- AutomationValidationError    -> 400 with the accumulating machine-readable
   error list (automation-contracts.md §Validation errors)
-- AutomationNotFoundError   -> 404
-- AutomationBuildingError   -> 409 (mid-build submission lock, spec §8.1)
+- AutomationNotFoundError      -> 404
+- AutomationBuildingError       -> 409 (mid-build submission lock, spec §8.1)
+- AutomationStateConflictError -> 409 (invalid enable/disable/delete transition)
 
 Every route passes `entity.tenant_id` into the BL: the caller's tenant comes
 from the session, never from the request body (spec §4.1/§8.1). An id owned by
@@ -102,6 +103,43 @@ async def update_automation(
         git,
     )
     return _detail(automation, data.script)
+
+
+@router.post("/automations/{automation_id}/enable", status_code=200)
+async def enable_automation(
+    automation_id: UUID,
+    entity: AuthenticatedEntity = Depends(get_authenticated_entity),
+):
+    # Lifecycle actions change only DB state (no script bytes), so they take no
+    # git client and work even when GitLab is unconfigured.
+    automation = await run_in_threadpool(
+        automations_bl.enable_automation, entity.tenant_id, automation_id, entity.email
+    )
+    return _detail(automation, None)
+
+
+@router.post("/automations/{automation_id}/disable", status_code=200)
+async def disable_automation(
+    automation_id: UUID,
+    entity: AuthenticatedEntity = Depends(get_authenticated_entity),
+):
+    automation = await run_in_threadpool(
+        automations_bl.disable_automation, entity.tenant_id, automation_id, entity.email
+    )
+    return _detail(automation, None)
+
+
+@router.delete("/automations/{automation_id}", status_code=200)
+async def delete_automation(
+    automation_id: UUID,
+    entity: AuthenticatedEntity = Depends(get_authenticated_entity),
+):
+    # Archive-mark, never erase (§5.4): returns the automation with
+    # matching_state=deleting.
+    automation = await run_in_threadpool(
+        automations_bl.delete_automation, entity.tenant_id, automation_id, entity.email
+    )
+    return _detail(automation, None)
 
 
 @router.get("/namespaces", status_code=200)

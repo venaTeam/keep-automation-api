@@ -16,3 +16,13 @@ class AutomationNotFoundError(Exception):
 
 class AutomationBuildingError(Exception):
     """Edit rejected while build_state=building (mid-build submission lock)."""
+
+
+class AutomationStateConflictError(Exception):
+    """A lifecycle action (enable/disable/delete) is not valid from the current
+    state — e.g. enabling an automation that has not built, or disabling one
+    that is not active. Carries a human-readable `detail` for the 409 body."""
+
+    def __init__(self, detail: str):
+        self.detail = detail
+        super().__init__(detail)

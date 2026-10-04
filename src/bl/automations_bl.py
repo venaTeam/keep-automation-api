@@ -31,6 +31,7 @@ from src.core.db import get_session
 from src.exceptions import (
     AutomationBuildingError,
     AutomationNotFoundError,
+    AutomationStateConflictError,
     AutomationValidationError,
 )
 from src.contracts.limits import TIMEOUT_SECONDS_DEFAULT, GRACE_SECONDS_DEFAULT
@@ -155,6 +156,99 @@ def update_automation(
         session.commit()
         session.refresh(automation)
         session.expunge(automation)
+    return automation
+
+
+def _record_revision(session, automation_id: UUID, action: RevisionAction, actor: str):
+    """Append an audit row for a lifecycle action with no new script bytes.
+
+    enable/disable/delete change only DB state, so `git_sha` is NULL — the
+    column is nullable precisely for these (§4.4). The human `actor` is the
+    authenticated email, same as create/edit.
+    """
+    session.add(
+        AutomationRevision(
+            automation_id=automation_id,
+            action=action,
+            git_sha=None,
+            actor=actor,
+        )
+    )
+
+
+def enable_automation(tenant_id: str, automation_id: UUID, actor: str) -> Automation:
+    """inactive -> active. Only a settled, successful build may be enabled.
+
+    No git side-effect: the script is unchanged, so this is a pure-DB
+    transaction (no commit to roll back).
+    """
+    with get_session() as session:
+        automation = _scoped_get(session, tenant_id, automation_id)
+        if automation.matching_state in (MatchingState.DELETING, MatchingState.DELETED):
+            raise AutomationStateConflictError("Automation is archived.")
+        if automation.build_state == BuildState.BUILDING:
+            raise AutomationBuildingError()
+        if automation.build_state == BuildState.BUILD_FAILED:
+            raise AutomationStateConflictError(
+                "Automation's last build failed; it cannot be enabled."
+            )
+        if automation.matching_state == MatchingState.ACTIVE:
+            return _detach(session, automation)  # idempotent, no new revision
+
+        automation.matching_state = MatchingState.ACTIVE
+        automation.updated_by = actor
+        session.add(automation)
+        session.flush()
+        _record_revision(session, automation_id, RevisionAction.ENABLE, actor)
+        return _commit_and_detach(session, automation)
+
+
+def disable_automation(tenant_id: str, automation_id: UUID, actor: str) -> Automation:
+    """active -> inactive. Pure-DB; allowed regardless of build state."""
+    with get_session() as session:
+        automation = _scoped_get(session, tenant_id, automation_id)
+        if automation.matching_state in (MatchingState.DELETING, MatchingState.DELETED):
+            raise AutomationStateConflictError("Automation is archived.")
+        if automation.matching_state == MatchingState.INACTIVE:
+            return _detach(session, automation)  # idempotent, no new revision
+
+        automation.matching_state = MatchingState.INACTIVE
+        automation.updated_by = actor
+        session.add(automation)
+        session.flush()
+        _record_revision(session, automation_id, RevisionAction.DISABLE, actor)
+        return _commit_and_detach(session, automation)
+
+
+def delete_automation(tenant_id: str, automation_id: UUID, actor: str) -> Automation:
+    """Archive-mark, never erase (§5.4): flips matching_state to `deleting`.
+
+    The row persists forever; the `deleting -> deleted` cascade (CAPP teardown
+    driven by `delete_cascade_step`) is a separate infra story. Idempotent: a
+    re-delete of an already-archived automation is a no-op.
+    """
+    with get_session() as session:
+        automation = _scoped_get(session, tenant_id, automation_id)
+        if automation.matching_state in (MatchingState.DELETING, MatchingState.DELETED):
+            return _detach(session, automation)  # already archived, no new revision
+
+        automation.matching_state = MatchingState.DELETING
+        automation.updated_by = actor
+        session.add(automation)
+        session.flush()
+        _record_revision(session, automation_id, RevisionAction.DELETE, actor)
+        return _commit_and_detach(session, automation)
+
+
+def _commit_and_detach(session, automation: Automation) -> Automation:
+    session.commit()
+    session.refresh(automation)
+    session.expunge(automation)
+    return automation
+
+
+def _detach(session, automation: Automation) -> Automation:
+    session.expunge(automation)
     return automation
 
 

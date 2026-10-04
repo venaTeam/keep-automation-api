@@ -7,13 +7,24 @@
 """
 from fastapi import Header
 
-from src.bl.git_client import GitClient, get_default_git_client
+from src.bl.git_client import GitClient, build_gitlab_client
 from src.models.api.identity import AuthenticatedEntity
+
+_git_client: GitClient | None = None
 
 
 def get_git_client() -> GitClient:
-    """Script-repo client. In-memory stub until D14 lands the GitLab client."""
-    return get_default_git_client()
+    """Script-repo client — the real GitLab client, built once and reused.
+
+    Fails fast if GitLab is unconfigured (build_gitlab_client raises), so a
+    misprovisioned pod surfaces on the first create/get rather than silently
+    dropping commits. Tests inject the in-memory stub via dependency_overrides,
+    so this GitLab path never runs under pytest.
+    """
+    global _git_client
+    if _git_client is None:
+        _git_client = build_gitlab_client()
+    return _git_client
 
 
 async def get_authenticated_entity() -> AuthenticatedEntity:

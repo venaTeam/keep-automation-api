@@ -16,6 +16,7 @@ from src import config
 from src.exceptions import (
     AutomationBuildingError,
     AutomationNotFoundError,
+    AutomationStateConflictError,
     AutomationValidationError,
 )
 
@@ -113,6 +114,14 @@ def get_app() -> FastAPI:
                 "detail": "Automation is mid-build; retry after the build completes"
             },
         )
+
+    @app.exception_handler(AutomationStateConflictError)
+    async def automation_state_conflict_handler(
+        request: Request, exc: AutomationStateConflictError
+    ) -> JSONResponse:
+        # Invalid lifecycle transition (enable/disable/delete). The BL carries
+        # the specific reason so the 409 body explains what the current state is.
+        return JSONResponse(status_code=409, content={"detail": exc.detail})
 
     # Health / root
     from src.api.routes.healthcheck import router as healthcheck_router
