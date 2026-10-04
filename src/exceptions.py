@@ -18,11 +18,8 @@ class AutomationBuildingError(Exception):
     """Edit rejected while build_state=building (mid-build submission lock)."""
 
 
-class AutomationStateConflictError(Exception):
-    """A lifecycle action (enable/disable/delete) is not valid from the current
-    state — e.g. enabling an automation that has not built, or disabling one
-    that is not active. Carries a human-readable `detail` for the 409 body."""
-
-    def __init__(self, detail: str):
-        self.detail = detail
-        super().__init__(detail)
+class ScriptRepoUnavailableError(Exception):
+    """The script repository (GitLab) could not be reached or returned an error
+    — a timeout, a connection failure, or a non-404 API error. Mapped to a 503
+    so the caller can retry; the DB transaction never committed, so there is no
+    orphan automation row to reconcile."""

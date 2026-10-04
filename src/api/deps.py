@@ -10,21 +10,21 @@ from fastapi import Header
 from src.bl.git_client import GitClient, build_gitlab_client
 from src.models.api.identity import AuthenticatedEntity
 
-_git_client: GitClient | None = None
-
 
 def get_git_client() -> GitClient:
-    """Script-repo client — the real GitLab client, built once and reused.
+    """Script-repo client — a fresh real GitLab client per request.
 
-    Fails fast if GitLab is unconfigured (build_gitlab_client raises), so a
-    misprovisioned pod surfaces on the first create/get rather than silently
-    dropping commits. Tests inject the in-memory stub via dependency_overrides,
-    so this GitLab path never runs under pytest.
+    Not a process-wide singleton: python-gitlab holds a non-thread-safe
+    requests.Session and the BL runs in a threadpool, so a shared client could
+    interleave concurrent requests' commits/reads. Construction does no network
+    I/O (the project handle is lazy), so per-request creation is cheap.
+
+    `build_gitlab_client` refuses under the noauth shim and fails fast if GitLab
+    is unconfigured, so a misprovisioned pod surfaces on the first create/get
+    rather than silently dropping commits. Tests inject the in-memory stub via
+    dependency_overrides, so this GitLab path never runs under pytest.
     """
-    global _git_client
-    if _git_client is None:
-        _git_client = build_gitlab_client()
-    return _git_client
+    return build_gitlab_client()
 
 
 async def get_authenticated_entity() -> AuthenticatedEntity:

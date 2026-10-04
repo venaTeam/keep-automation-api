@@ -11,13 +11,21 @@ Blocking-I/O pattern (pinned for this service, same as `src/bl/ssrf.py`): the BL
 is synchronous and routes run it via `run_in_threadpool`, so a stalled syscall
 never blocks the event loop; every network call is additionally bounded by a
 single-use executor + `future.result(timeout)` because `requests`' own timeout
-does not reliably cover DNS resolution.
+does not reliably cover DNS resolution, and on timeout the executor is torn down
+*without waiting* so the caller is released immediately.
+
+Threading: `python-gitlab` holds a non-thread-safe `requests.Session`, and the
+BL runs in a threadpool, so a client is built fresh per call (see
+`get_git_client`) rather than shared process-wide. Construction does no network
+I/O — the project handle is lazy — so per-call creation is cheap.
 """
 import hashlib
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from typing import Protocol, runtime_checkable
 
 from src import config
+from src.exceptions import ScriptRepoUnavailableError
 
 
 @runtime_checkable
@@ -78,7 +86,11 @@ class GitlabGitClient:
                 private_token=config.GITLAB_SCRIPTS_TOKEN,
                 timeout=config.GITLAB_TIMEOUT_SECONDS,
             )
-            self._project = self._bounded(gl.projects.get, config.GITLAB_SCRIPTS_PROJECT)
+            # lazy=True resolves no network round trip here — the project is a
+            # proxy and the first real call carries the auth. A fresh Gitlab
+            # client (and its requests.Session) is built per GitlabGitClient, so
+            # nothing is shared across concurrent threadpool workers.
+            self._project = gl.projects.get(config.GITLAB_SCRIPTS_PROJECT, lazy=True)
         return self._project
 
     @staticmethod
@@ -87,12 +99,18 @@ class GitlabGitClient:
 
         Mirrors `ssrf._resolve_bounded`: `requests`' timeout misses DNS, so the
         call is wrapped in a single-use executor and reaped with
-        `future.result(timeout)`. A `FutureTimeoutError` propagates so the BL
-        transaction rolls back (commit) or the GET surfaces an error (read).
+        `future.result(timeout)`. On timeout the executor is shut down with
+        `wait=False` so the caller returns immediately instead of blocking until
+        the hung request finally ends (the `with ThreadPoolExecutor(...)` form
+        would block on exit via `shutdown(wait=True)`).
         """
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(fn, *args, **kwargs)
-            return future.result(timeout=config.GITLAB_TIMEOUT_SECONDS)
+        executor = ThreadPoolExecutor(max_workers=1)
+        try:
+            return executor.submit(fn, *args, **kwargs).result(
+                timeout=config.GITLAB_TIMEOUT_SECONDS
+            )
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
 
     def commit_script(self, script_path: str, content: str, message: str) -> str:
         import gitlab
@@ -114,18 +132,23 @@ class GitlabGitClient:
             )
 
         # The Protocol hides create-vs-update, so resolve it here: an edit
-        # ("update") is the common case; a first commit (brand-new UUID path, or
-        # a retry after a prior success that failed to persist its DB row) falls
-        # back to "create". Any other GitLab error propagates — "raises on
-        # failure" is the Protocol contract the BL relies on to roll back.
+        # ("update") is the common case; a first commit (brand-new UUID path)
+        # falls back to "create" — but ONLY when GitLab says the file is absent.
+        # Any other error (protected branch, auth, 5xx, timeout) must NOT be
+        # masked as a create; it surfaces as a retryable 503.
         try:
-            commit = _commit("update")
-        except gitlab.exceptions.GitlabCreateError as exc:
-            if exc.response_code == 400:
-                commit = _commit("create")
-            else:
-                raise
-        return commit.id
+            try:
+                commit = _commit("update")
+            except gitlab.exceptions.GitlabCreateError as exc:
+                if _is_missing_file(exc):
+                    commit = _commit("create")
+                else:
+                    raise
+            return commit.id
+        except (gitlab.exceptions.GitlabError, FutureTimeoutError) as exc:
+            raise ScriptRepoUnavailableError(
+                f"GitLab commit failed for {script_path}"
+            ) from exc
 
     def read_script(self, script_path: str) -> str | None:
         import gitlab
@@ -140,17 +163,51 @@ class GitlabGitClient:
         except gitlab.exceptions.GitlabGetError as exc:
             if exc.response_code == 404:
                 return None
-            raise
+            raise ScriptRepoUnavailableError(
+                f"GitLab read failed for {script_path}"
+            ) from exc
+        except (gitlab.exceptions.GitlabError, FutureTimeoutError) as exc:
+            raise ScriptRepoUnavailableError(
+                f"GitLab read failed for {script_path}"
+            ) from exc
         return raw.decode("utf-8") if isinstance(raw, bytes) else raw
 
 
-def build_gitlab_client() -> GitlabGitClient:
-    """Construct the real client, or fail fast if GitLab is unconfigured.
+def _is_missing_file(exc) -> bool:
+    """True only for the GitLab 400 that means 'this file does not exist yet'.
 
-    A deploy that forgets the script-repo config must not silently fall back to
-    the in-memory stub and lose every commit — so a missing URL / token /
-    project is a hard error here (raised on first request, not at import).
+    GitLab returns 400 for several commit problems (protected branch, bad
+    payload); only the missing-file case justifies retrying as a create.
     """
+    message = getattr(exc, "error_message", "") or ""
+    if not isinstance(message, str):
+        message = str(message)
+    message = message.lower()
+    return getattr(exc, "response_code", None) == 400 and (
+        "doesn't exist" in message or "does not exist" in message
+    )
+
+
+def build_gitlab_client() -> GitlabGitClient:
+    """Construct the real client, or refuse / fail fast.
+
+    Two guards, both raised on first request rather than at import:
+
+    1. Refuse while user-tier auth is a noauth shim. The routes attribute every
+       commit to the single service identity; with no real caller identity the
+       human actor on the revision row is a placeholder and anyone who can reach
+       `POST /automations` can write to the shared script repo. Do not mount the
+       real client until user-tier auth is real (D14 safety gate).
+    2. Fail fast if the script-repo config is missing — a deploy that forgets it
+       must not silently fall back to the in-memory stub and lose every commit.
+    """
+    if config.AUTH_TYPE == "noauth":
+        raise RuntimeError(
+            "Refusing to serve the GitLab script-repo client while "
+            "AUTH_TYPE=noauth: user-tier requests are unauthenticated, so every "
+            "commit would be attributed to the service identity with no real "
+            "caller recorded. Enable real user-tier auth first (D14 safety gate)."
+        )
     missing = [
         name
         for name, value in (

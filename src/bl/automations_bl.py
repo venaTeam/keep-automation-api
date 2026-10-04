@@ -11,10 +11,20 @@ server-derived from the authenticated entity; `AutomationIn` deliberately has no
 `tenant_id` field (§4.1), so a client cannot supply one. Note that a primary-key
 `session.get()` cannot express this filter — hence the explicit selects below.
 
-Transactional shape (create and update): the `automations` row and its
-`automation_revisions` row are written in ONE session; the git commit happens
-inside that transaction (after flush, before commit) so a git failure rolls
-back both rows — no orphan DB state, retry is a clean resubmit.
+Ordering (create and update): git I/O is NEVER done while a pooled DB
+connection is held — a hung GitLab call would pin the small shared pool. So the
+git commit happens *outside* the session, and the DB rows are written in a
+short transaction that only touches the database:
+
+- create: commit to git first, then INSERT the automation + revision rows in
+  one transaction. A git failure writes no rows (clean, retryable). A DB
+  failure after a successful commit leaves an unreferenced blob at that
+  globally-unique `{uuid}/script.py` path — harmless, never reused, and a retry
+  mints a fresh uuid.
+- update: authorize + read `script_path` in a first short transaction (released
+  before any network call), commit to git, then apply the field changes +
+  revision row in a second short transaction, re-checking the build lock. A git
+  failure leaves the row untouched (retryable).
 
 Coupling note: create/edit set `build_state=building` (spec §5.1). Nothing in
 D13 clears it — the D15 CI webhook flips it to idle/build_failed on build
@@ -31,7 +41,6 @@ from src.core.db import get_session
 from src.exceptions import (
     AutomationBuildingError,
     AutomationNotFoundError,
-    AutomationStateConflictError,
     AutomationValidationError,
 )
 from src.contracts.limits import TIMEOUT_SECONDS_DEFAULT, GRACE_SECONDS_DEFAULT
@@ -72,6 +81,10 @@ def create_automation(
     _validated(data)
     automation_id = uuid4()
     script_path = f"{automation_id}/script.py"
+    # Commit to git first, holding no DB connection across the network call.
+    git_sha = git.commit_script(
+        script_path, data.script, f"create {data.name} ({automation_id})"
+    )
     automation = Automation(
         id=automation_id,
         tenant_id=tenant_id,
@@ -92,10 +105,6 @@ def create_automation(
     )
     with get_session() as session:
         session.add(automation)
-        session.flush()
-        git_sha = git.commit_script(
-            script_path, data.script, f"create {data.name} ({automation_id})"
-        )
         session.add(
             AutomationRevision(
                 automation_id=automation_id,
@@ -123,6 +132,23 @@ def update_automation(
     # `create`'s shape as the reference). The build-state 409 stays inside the
     # session; a wasted validation on that path costs nothing.
     _validated(data)
+    # Phase 1 — authorize and read what git needs, then release the connection
+    # before any network call. The 404 (unknown / cross-tenant id) and the
+    # mid-build 409 are decided here, holding no connection across GitLab.
+    with get_session() as session:
+        automation = _scoped_get(session, tenant_id, automation_id)
+        if automation.build_state == BuildState.BUILDING:
+            raise AutomationBuildingError()
+        script_path = automation.script_path
+
+    # Phase 2 — commit to git with no DB connection held. A failure here leaves
+    # the row untouched (retryable); nothing has changed yet.
+    git_sha = git.commit_script(
+        script_path, data.script, f"edit {data.name} ({automation_id})"
+    )
+
+    # Phase 3 — apply the change in a second short transaction, re-fetching and
+    # re-checking the build lock (a concurrent edit may have armed it meanwhile).
     with get_session() as session:
         automation = _scoped_get(session, tenant_id, automation_id)
         if automation.build_state == BuildState.BUILDING:
@@ -141,10 +167,6 @@ def update_automation(
         automation.updated_by = actor
 
         session.add(automation)
-        session.flush()
-        git_sha = git.commit_script(
-            automation.script_path, data.script, f"edit {data.name} ({automation_id})"
-        )
         session.add(
             AutomationRevision(
                 automation_id=automation_id,
@@ -156,99 +178,6 @@ def update_automation(
         session.commit()
         session.refresh(automation)
         session.expunge(automation)
-    return automation
-
-
-def _record_revision(session, automation_id: UUID, action: RevisionAction, actor: str):
-    """Append an audit row for a lifecycle action with no new script bytes.
-
-    enable/disable/delete change only DB state, so `git_sha` is NULL — the
-    column is nullable precisely for these (§4.4). The human `actor` is the
-    authenticated email, same as create/edit.
-    """
-    session.add(
-        AutomationRevision(
-            automation_id=automation_id,
-            action=action,
-            git_sha=None,
-            actor=actor,
-        )
-    )
-
-
-def enable_automation(tenant_id: str, automation_id: UUID, actor: str) -> Automation:
-    """inactive -> active. Only a settled, successful build may be enabled.
-
-    No git side-effect: the script is unchanged, so this is a pure-DB
-    transaction (no commit to roll back).
-    """
-    with get_session() as session:
-        automation = _scoped_get(session, tenant_id, automation_id)
-        if automation.matching_state in (MatchingState.DELETING, MatchingState.DELETED):
-            raise AutomationStateConflictError("Automation is archived.")
-        if automation.build_state == BuildState.BUILDING:
-            raise AutomationBuildingError()
-        if automation.build_state == BuildState.BUILD_FAILED:
-            raise AutomationStateConflictError(
-                "Automation's last build failed; it cannot be enabled."
-            )
-        if automation.matching_state == MatchingState.ACTIVE:
-            return _detach(session, automation)  # idempotent, no new revision
-
-        automation.matching_state = MatchingState.ACTIVE
-        automation.updated_by = actor
-        session.add(automation)
-        session.flush()
-        _record_revision(session, automation_id, RevisionAction.ENABLE, actor)
-        return _commit_and_detach(session, automation)
-
-
-def disable_automation(tenant_id: str, automation_id: UUID, actor: str) -> Automation:
-    """active -> inactive. Pure-DB; allowed regardless of build state."""
-    with get_session() as session:
-        automation = _scoped_get(session, tenant_id, automation_id)
-        if automation.matching_state in (MatchingState.DELETING, MatchingState.DELETED):
-            raise AutomationStateConflictError("Automation is archived.")
-        if automation.matching_state == MatchingState.INACTIVE:
-            return _detach(session, automation)  # idempotent, no new revision
-
-        automation.matching_state = MatchingState.INACTIVE
-        automation.updated_by = actor
-        session.add(automation)
-        session.flush()
-        _record_revision(session, automation_id, RevisionAction.DISABLE, actor)
-        return _commit_and_detach(session, automation)
-
-
-def delete_automation(tenant_id: str, automation_id: UUID, actor: str) -> Automation:
-    """Archive-mark, never erase (§5.4): flips matching_state to `deleting`.
-
-    The row persists forever; the `deleting -> deleted` cascade (CAPP teardown
-    driven by `delete_cascade_step`) is a separate infra story. Idempotent: a
-    re-delete of an already-archived automation is a no-op.
-    """
-    with get_session() as session:
-        automation = _scoped_get(session, tenant_id, automation_id)
-        if automation.matching_state in (MatchingState.DELETING, MatchingState.DELETED):
-            return _detach(session, automation)  # already archived, no new revision
-
-        automation.matching_state = MatchingState.DELETING
-        automation.updated_by = actor
-        session.add(automation)
-        session.flush()
-        _record_revision(session, automation_id, RevisionAction.DELETE, actor)
-        return _commit_and_detach(session, automation)
-
-
-def _commit_and_detach(session, automation: Automation) -> Automation:
-    session.commit()
-    session.refresh(automation)
-    session.expunge(automation)
-    return automation
-
-
-def _detach(session, automation: Automation) -> Automation:
-    session.expunge(automation)
     return automation
 
 

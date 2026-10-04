@@ -16,8 +16,8 @@ from src import config
 from src.exceptions import (
     AutomationBuildingError,
     AutomationNotFoundError,
-    AutomationStateConflictError,
     AutomationValidationError,
+    ScriptRepoUnavailableError,
 )
 
 load_dotenv(find_dotenv())
@@ -115,13 +115,17 @@ def get_app() -> FastAPI:
             },
         )
 
-    @app.exception_handler(AutomationStateConflictError)
-    async def automation_state_conflict_handler(
-        request: Request, exc: AutomationStateConflictError
+    @app.exception_handler(ScriptRepoUnavailableError)
+    async def script_repo_unavailable_handler(
+        request: Request, exc: ScriptRepoUnavailableError
     ) -> JSONResponse:
-        # Invalid lifecycle transition (enable/disable/delete). The BL carries
-        # the specific reason so the 409 body explains what the current state is.
-        return JSONResponse(status_code=409, content={"detail": exc.detail})
+        # The script repo (GitLab) timed out or errored. 503, not 500: the DB
+        # transaction never committed, so no row was written — the client can
+        # safely retry the same request.
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "Script repository is unavailable; retry shortly"},
+        )
 
     # Health / root
     from src.api.routes.healthcheck import router as healthcheck_router

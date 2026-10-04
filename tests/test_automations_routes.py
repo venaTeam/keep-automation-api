@@ -139,52 +139,6 @@ def test_put_invalid_payload_returns_accumulating_400(client, test_engine):
     assert {"triggers_too_few", "unknown_field"} <= codes
 
 
-# --- enable / disable / delete ------------------------------------------
-
-
-def test_enable_disable_round_trip(client, test_engine):
-    created = client.post("/automations", json=VALID).json()
-    # Clear the build lock as the D15 webhook would, so the row can be enabled.
-    with test_engine.begin() as conn:
-        conn.execute(text("UPDATE automations SET build_state = 'idle'"))
-
-    enabled = client.post(f"/automations/{created['id']}/enable")
-    assert enabled.status_code == 200
-    assert enabled.json()["matching_state"] == "active"
-
-    disabled = client.post(f"/automations/{created['id']}/disable")
-    assert disabled.status_code == 200
-    assert disabled.json()["matching_state"] == "inactive"
-
-
-def test_enable_while_building_returns_409(client):
-    created = client.post("/automations", json=VALID).json()  # build_state=building
-    resp = client.post(f"/automations/{created['id']}/enable")
-    assert resp.status_code == 409
-    assert "detail" in resp.json()
-
-
-def test_delete_archives_and_returns_deleting(client, test_engine):
-    created = client.post("/automations", json=VALID).json()
-    resp = client.delete(f"/automations/{created['id']}")
-    assert resp.status_code == 200
-    assert resp.json()["matching_state"] == "deleting"
-    # Archive-mark, never erase: the row is still present.
-    with test_engine.connect() as conn:
-        count = conn.execute(text("SELECT COUNT(*) FROM automations")).scalar()
-    assert count == 1
-
-
-def test_lifecycle_of_another_tenants_id_is_404(client_as, test_engine):
-    theirs = client_as(OTHER_TENANT).post("/automations", json=VALID).json()
-    with test_engine.begin() as conn:
-        conn.execute(text("UPDATE automations SET build_state = 'idle'"))
-    mine = client_as(TENANT)
-    assert mine.post(f"/automations/{theirs['id']}/enable").status_code == 404
-    assert mine.post(f"/automations/{theirs['id']}/disable").status_code == 404
-    assert mine.delete(f"/automations/{theirs['id']}").status_code == 404
-
-
 # --- tenant isolation ---------------------------------------------------
 
 
