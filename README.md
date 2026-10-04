@@ -66,7 +66,7 @@ is authoring CRUD. The ~200 submits/s path (D17) will need these revisited.
 
 | Tier | Router | Auth | Notes |
 |---|---|---|---|
-| **user** | `src/api/routes/user/` | existing identity/session (noauth shim for now) | UI-facing CRUD, `/events` SSE |
+| **user** | `src/api/routes/user/` | existing identity/session (noauth shim for CRUD only) | UI-facing CRUD, `/events` SSE, lifecycle routes require real identity |
 | **machine** | `src/api/routes/machine/` | GitLab secret token | CI webhook — network-restricted |
 | **internal** | `src/api/routes/internal/` | service token | consumer + reconciler — network-restricted |
 
@@ -101,6 +101,10 @@ Git I/O never runs inside a DB transaction or under a row lock:
 Enable/disable bump `index_generation`, write an `automation_revisions` row and
 publish the Redis `reload` signal **after commit**. Toggles and edits on a
 `deleting`/`deleted` automation return `409`.
+
+Lifecycle mutations fail closed while the noauth identity shim is active. The
+shared identity provider must return the real tenant and actor before
+enable/disable or DELETE can be used.
 
 **Delete cascade** (`src/bl/cascade.py`) — `delete_cascade_step` is the last
 completed step:

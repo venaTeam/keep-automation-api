@@ -21,6 +21,7 @@ from src.api.deps import (
     get_authenticated_entity,
     get_cascade_deps,
     get_reload_publisher,
+    require_lifecycle_auth,
 )
 from src.bl import cascade, lifecycle
 from src.core.reload import ReloadPublisher
@@ -28,7 +29,9 @@ from src.models.api.automation import LifecycleStatusOut
 from src.models.api.identity import AuthenticatedEntity
 from src.models.db.automation import MatchingState
 
-router = APIRouter(dependencies=[Depends(get_authenticated_entity)])
+router = APIRouter(
+    dependencies=[Depends(get_authenticated_entity), Depends(require_lifecycle_auth)]
+)
 
 
 @router.post("/automations/{automation_id}/enable", status_code=status.HTTP_200_OK)

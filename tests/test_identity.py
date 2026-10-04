@@ -6,8 +6,12 @@ constructed, not as a KeyError deep in a route.
 """
 import pytest
 from pydantic import ValidationError
+from fastapi.testclient import TestClient
 
-from src.api.deps import get_authenticated_entity
+from src import config
+from src.api.deps import get_authenticated_entity, require_lifecycle_auth
+from src.exceptions import LifecycleAuthenticationNotConfiguredError
+from src.main import get_app
 from src.models.api.identity import AuthenticatedEntity
 
 
@@ -16,6 +20,33 @@ async def test_noauth_shim_returns_the_schema():
     assert isinstance(entity, AuthenticatedEntity)
     assert entity.tenant_id == "keep"
     assert entity.email == "noauth@keep"
+
+
+def test_lifecycle_auth_fails_closed_with_noauth(monkeypatch):
+    monkeypatch.setattr(config, "AUTH_TYPE", "noauth")
+    with pytest.raises(LifecycleAuthenticationNotConfiguredError):
+        require_lifecycle_auth(AuthenticatedEntity(tenant_id="keep", email="noauth@keep"))
+
+
+def test_lifecycle_auth_rejects_shim_even_if_auth_mode_is_changed(monkeypatch):
+    monkeypatch.setattr(config, "AUTH_TYPE", "identity")
+    with pytest.raises(LifecycleAuthenticationNotConfiguredError):
+        require_lifecycle_auth(AuthenticatedEntity(tenant_id="keep", email="noauth@keep"))
+
+
+def test_lifecycle_auth_allows_real_identity(monkeypatch):
+    monkeypatch.setattr(config, "AUTH_TYPE", "identity")
+    require_lifecycle_auth(
+        AuthenticatedEntity(tenant_id="keep", email="operator@keep")
+    )
+
+
+def test_lifecycle_route_fails_closed_under_noauth(monkeypatch):
+    monkeypatch.setattr(config, "AUTH_TYPE", "noauth")
+    with TestClient(get_app()) as client:
+        response = client.post("/automations/00000000-0000-0000-0000-000000000000/disable")
+    assert response.status_code == 503
+    assert "identity provider" in response.json()["detail"]
 
 
 @pytest.mark.parametrize("missing", ["tenant_id", "email"])

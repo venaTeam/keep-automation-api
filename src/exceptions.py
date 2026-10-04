@@ -43,6 +43,10 @@ class AutomationBusyError(Exception):
     """
 
 
+class LifecycleAuthenticationNotConfiguredError(Exception):
+    """Destructive lifecycle routes cannot run through the noauth shim."""
+
+
 class AutomationEditSupersededError(Exception):
     """An edit's build claim was released before the edit could finish.
 

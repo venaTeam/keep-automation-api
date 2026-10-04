@@ -45,7 +45,11 @@ from sqlmodel import SQLModel
 
 import src.core.db as db_core
 import src.models.db  # noqa: F401  registers the automation tables on the metadata
-from src.api.deps import get_authenticated_entity, get_reload_publisher
+from src.api.deps import (
+    get_authenticated_entity,
+    get_reload_publisher,
+    require_lifecycle_auth,
+)
 from src.models.api.identity import AuthenticatedEntity
 from src.main import get_app
 
@@ -186,7 +190,12 @@ def app_overrides(reload_publisher):
     Tests never reach a real Redis even when REDIS_URL is set in the shell;
     later fixtures add the cascade adapters to this same dict.
     """
-    return {get_reload_publisher: lambda: reload_publisher}
+    return {
+        get_reload_publisher: lambda: reload_publisher,
+        # Lifecycle route tests exercise the state machine with an explicit
+        # identity override; production noauth access is blocked by default.
+        require_lifecycle_auth: lambda: None,
+    }
 
 
 @pytest.fixture()

@@ -7,6 +7,7 @@
 """
 from fastapi import Depends, Header
 
+from src import config
 from src.bl.cascade import CascadeDeps
 from src.bl.cascade_adapters import (
     CappDeletionClient,
@@ -16,6 +17,7 @@ from src.bl.cascade_adapters import (
 )
 from src.bl.git_client import GitClient, get_default_git_client
 from src.core.reload import ReloadPublisher, get_default_reload_publisher
+from src.exceptions import LifecycleAuthenticationNotConfiguredError
 from src.models.api.identity import AuthenticatedEntity
 
 
@@ -60,6 +62,20 @@ async def get_authenticated_entity() -> AuthenticatedEntity:
     every tenant-scoped query downstream are typed against.
     """
     return AuthenticatedEntity(tenant_id="keep", email="noauth@keep")
+
+
+def require_lifecycle_auth(
+    entity: AuthenticatedEntity = Depends(get_authenticated_entity),
+) -> None:
+    """Fail closed for lifecycle mutations until real identity is configured.
+
+    CRUD keeps the D12 noauth shim for local development, but enable/disable and
+    DELETE mutate shared state and DELETE is irreversible. They must not use the
+    hard-coded tenant identity when the service is reachable in an environment
+    without the real identity provider.
+    """
+    if config.AUTH_TYPE == "noauth" or entity.email == "noauth@keep":
+        raise LifecycleAuthenticationNotConfiguredError()
 
 
 async def verify_ci_webhook_token(x_gitlab_token: str | None = Header(default=None)):

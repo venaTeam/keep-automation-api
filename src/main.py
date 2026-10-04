@@ -20,6 +20,7 @@ from src.exceptions import (
     AutomationLifecycleConflictError,
     AutomationNotFoundError,
     AutomationValidationError,
+    LifecycleAuthenticationNotConfiguredError,
 )
 
 load_dotenv(find_dotenv())
@@ -148,6 +149,20 @@ def get_app() -> FastAPI:
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             headers={"Retry-After": "1"},
             content={"detail": "Automation is busy; retry shortly"},
+        )
+
+    @app.exception_handler(LifecycleAuthenticationNotConfiguredError)
+    async def lifecycle_auth_not_configured_handler(
+        request: Request, exc: LifecycleAuthenticationNotConfiguredError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={
+                "detail": (
+                    "Lifecycle operations are unavailable until the identity "
+                    "provider is configured"
+                )
+            },
         )
 
     @app.exception_handler(AutomationEditSupersededError)
