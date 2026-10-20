@@ -8,6 +8,9 @@ from collections.abc import Mapping
 
 # Service
 KEEP_VERSION = os.environ.get("KEEP_VERSION", "0.1.0")
+# Root log level. Without it the service's INFO lines (DB target, build
+# cutovers) are dropped by Python's last-resort handler (WARNING+ only).
+LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 HOST = os.environ.get("KEEP_AUTOMATION_API_HOST", "0.0.0.0")
 PORT = int(os.environ.get("KEEP_AUTOMATION_API_PORT", "8080"))
 
@@ -15,7 +18,9 @@ PORT = int(os.environ.get("KEEP_AUTOMATION_API_PORT", "8080"))
 # Only "noauth" is wired in the skeleton; the shared identity manager is vendored later.
 AUTH_TYPE = os.environ.get("AUTH_TYPE", "noauth").lower()
 
-# Tier tokens (placeholders — real values from A0; verification wired in D15/D17/D20).
+# Tier tokens (values from A0). CI_WEBHOOK_TOKEN is enforced since D15 and fails
+# closed: empty = every CI webhook is rejected. INTERNAL_SERVICE_TOKEN is still a
+# placeholder until D17/D20 verify it.
 CI_WEBHOOK_TOKEN = os.environ.get("CI_WEBHOOK_TOKEN", "")
 INTERNAL_SERVICE_TOKEN = os.environ.get("INTERNAL_SERVICE_TOKEN", "")
 
@@ -112,3 +117,48 @@ DB_POOL_TIMEOUT = int(os.environ.get("DATABASE_POOL_TIMEOUT", "10"))
 # CORS — comma-separated trusted browser origins.
 _cors_raw = os.environ.get("KEEP_CORS_TRUSTED_ORIGINS", "*")
 CORS_TRUSTED_ORIGINS = [o.strip() for o in _cors_raw.split(",") if o.strip()] or ["*"]
+
+# Redis — the pub/sub `reload` invalidation signal (automation-contracts.md
+# §"Redis keys" → Invalidation). Same variable names keep-event-handler reads
+# (src/config/consts.py), so one deploy setting points publisher and subscriber
+# at the same channel. Empty REDIS_URL disables publishing: the event-handler's
+# unconditional periodic reload still converges the index, only sub-second
+# propagation is lost (spec §6.1 #2).
+REDIS_URL = os.environ.get("REDIS_URL", "")
+AUTOMATION_RELOAD_CHANNEL = os.environ.get("AUTOMATION_RELOAD_CHANNEL", "reload")
+# Bounds connect + publish. A publish runs after a lifecycle commit on the
+# request path; a black-holed Redis must not turn enable/disable/delete into a
+# hung request. Failure is logged and swallowed — the transition is committed.
+REDIS_PUBLISH_TIMEOUT_SECONDS = float(
+    os.environ.get("REDIS_PUBLISH_TIMEOUT_SECONDS", "1.0")
+)
+
+# Build lock (spec §4.4 `build_lock_deadline`, §6.2): how long an edit/create
+# may hold `build_state=building` before E21's stuck-build branch may release
+# it. Must exceed the p99 pipeline + CAPP rollout time (spec: 30 min).
+BUILD_LOCK_TIMEOUT_SECONDS = int(
+    os.environ.get("AUTOMATION_BUILD_LOCK_TIMEOUT_SECONDS", "1800")
+)
+
+# Automation state events (D15) — build transitions published on this Redis
+# pub/sub channel for the user-tier SSE stream (`GET /events`, D19) to fan out.
+# Redis rather than an in-process queue: the container runs `gunicorn -w 4`, so
+# the worker that handles a CI webhook is rarely the one holding the browser's
+# SSE connection. Best-effort like `reload` — an SSE event is a UI nudge, the
+# row is the truth. Event shape: automation-contracts.md §"CI webhook".
+AUTOMATION_EVENTS_CHANNEL = os.environ.get(
+    "AUTOMATION_EVENTS_CHANNEL", "automation-events"
+)
+
+# CI webhook (D15) — the image a success webhook may cut over to must live at
+# `{AUTOMATION_IMAGE_REPOSITORY}/{automation_id}@sha256:…`: the docker
+# repository prefix CI pushes per-automation images under (A0/F23; the same
+# registry path D18's ARTIFACTORY_* settings point at). Binding the image to the
+# automation means one pipeline's token cannot deploy an arbitrary image — or
+# another automation's — into a wallet with that wallet's secrets mounted.
+# Empty = every success webhook is refused with 503 (fail closed).
+AUTOMATION_IMAGE_REPOSITORY = os.environ.get("AUTOMATION_IMAGE_REPOSITORY", "")
+# Largest webhook body accepted. Checked from Content-Length *before* the body is
+# read, together with the token, so an unauthenticated or oversized request
+# never gets buffered. A real payload is well under 1 KiB.
+CI_WEBHOOK_MAX_BODY_BYTES = int(os.environ.get("CI_WEBHOOK_MAX_BODY_BYTES", "16384"))

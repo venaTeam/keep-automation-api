@@ -5,9 +5,10 @@ Control-plane API for the Keep **Automations** feature — a **dedicated service
 tables, the CI webhook, SSE to the UI, git commits, and CAPP deploy/rollouts, and
 custodies the single CAPP service identity.
 
-> **Status: authoring CRUD.** The FastAPI shell, the three exposure-tier routers
-> and the authoring CRUD endpoints are in place; submit, the CI webhook, the
-> reconciler and SSE payloads are still stubs (D14–D20).
+> **Status: authoring CRUD + CI webhook.** The FastAPI shell, the three
+> exposure-tier routers, the authoring CRUD endpoints and the CI webhook (D15)
+> are in place; submit, the reconciler, the SSE stream and the real CAPP client
+> (D16 — until then the webhook fails closed with 503) are still stubs.
 
 ## Database
 
@@ -70,6 +71,29 @@ Auth is driven by the **existing identity provider** — never a second auth sta
 (§10.2). A minimal noauth shim stands in until the shared identity manager is
 vendored.
 
+## CI webhook (D15)
+
+`POST /internal/ci-webhook` — called by the script repo's pipeline when one
+automation's build finishes. Payload, responses and the SSE event shape are in
+`automation-contracts.md` §"CI webhook"; the cutover logic is
+`src/bl/builds.py`.
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `CI_WEBHOOK_TOKEN` | _(empty)_ | Shared secret CI sends as `X-Gitlab-Token`. **Empty = every webhook is rejected (401)** — fail closed. |
+| `AUTOMATION_IMAGE_REPOSITORY` | _(empty)_ | Docker repository prefix CI pushes to; a success webhook's `image` must be `{prefix}/{automation_id}@sha256:…`. **Empty = every success webhook is refused (503).** |
+| `CI_WEBHOOK_MAX_BODY_BYTES` | `16384` | Checked from `Content-Length` with the token, before the body is read (`411` without one, `413` above it). |
+| `LOG_LEVEL` | `INFO` | Root log level (cutovers and build failures log at INFO, refusals at WARNING). |
+| `AUTOMATION_BUILD_LOCK_TIMEOUT_SECONDS` | `1800` | `build_lock_deadline` armed on create/edit (E21 releases past it). |
+| `REDIS_URL` | _(empty)_ | `reload` signal + automation events. Empty = both skipped (periodic reload still converges the index). |
+| `AUTOMATION_RELOAD_CHANNEL` | `reload` | Must match keep-event-handler's subscriber. |
+| `AUTOMATION_EVENTS_CHANNEL` | `automation-events` | Build events for the `GET /events` SSE stream (D19 subscribes). |
+| `REDIS_PUBLISH_TIMEOUT_SECONDS` | `1.0` | Bounds each publish; failures are logged and swallowed. |
+
+For local poking without CI, send the webhook yourself (the row's
+`building_sha` is the `commit_sha` to use). Until D16 lands a success webhook
+answers 503 — the build stays `building`; a `failed` one works.
+
 ## Run locally
 
 ```bash
@@ -89,6 +113,6 @@ stand-in — see the note at the top of `tests/conftest.py`.
 
 ## Deferred
 
-- Business endpoints (submit, reconciler, CI webhook, runs, SSE payloads) — **D14–D20**.
+- Business endpoints (submit, reconciler, runs, SSE stream) — **D17–D20**; the real CAPP client — **D16**.
 - Deploy + NetworkPolicy manifests — handled out-of-repo (A0 infra).
-- Real identity-provider integration + tier token verification.
+- Real identity-provider integration + internal-tier token verification (the machine tier's is live since D15).
