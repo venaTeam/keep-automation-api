@@ -26,15 +26,19 @@ short transaction that only touches the database:
   revision row in a second short transaction, re-checking the build lock. A git
   failure leaves the row untouched (retryable).
 
-Coupling note: create/edit set `build_state=building` (spec §5.1). Nothing in
-D13 clears it — the D15 CI webhook flips it to idle/build_failed on build
-completion. Until D15 lands, a freshly created automation stays `building`
-and PUT correctly returns the mid-build 409.
+Build lock: create/edit set `build_state=building` and arm the lock (spec
+§5.1, §4.4) — `building_sha` is the commit CI will build, `build_lock_deadline`
+the point past which E21 may release a lock whose webhook never came. The D15
+CI webhook (`src/bl/builds.py`) admits only the build whose SHA matches
+`building_sha` and clears all three on completion; until it arrives PUT returns
+the mid-build 409.
 """
+from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
 from sqlalchemy import select
 
+from src import config
 from src.bl.git_client import GitClient
 from src.bl.validation import validate_automation
 from src.core.db import get_session
@@ -50,6 +54,12 @@ from src.models.db.automation_revision import AutomationRevision, RevisionAction
 
 # Bounded list query — ~500 automations expected; pagination is a follow-up.
 LIST_LIMIT = 1000
+
+
+def _build_lock_deadline() -> datetime:
+    return datetime.now(timezone.utc) + timedelta(
+        seconds=config.BUILD_LOCK_TIMEOUT_SECONDS
+    )
 
 
 def _validated(data: AutomationIn) -> None:
@@ -100,6 +110,8 @@ def create_automation(
         logstash_url=data.logstash_url,
         matching_state=MatchingState.INACTIVE,
         build_state=BuildState.BUILDING,
+        building_sha=git_sha,
+        build_lock_deadline=_build_lock_deadline(),
         created_by=actor,
         updated_by=actor,
     )
@@ -164,6 +176,8 @@ def update_automation(
         automation.grace_seconds = data.grace_seconds or GRACE_SECONDS_DEFAULT
         automation.logstash_url = data.logstash_url
         automation.build_state = BuildState.BUILDING
+        automation.building_sha = git_sha
+        automation.build_lock_deadline = _build_lock_deadline()
         automation.updated_by = actor
 
         session.add(automation)

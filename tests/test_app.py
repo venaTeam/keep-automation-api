@@ -26,7 +26,8 @@ def test_user_tier_mounted(client):
 
 
 def test_machine_tier_mounted(client):
-    assert client.post("/internal/ci-webhook").status_code == 200
+    # Mounted and gated: without the CI token the webhook is refused (D15).
+    assert client.post("/internal/ci-webhook").status_code == 401
 
 
 def test_internal_tier_mounted(client):

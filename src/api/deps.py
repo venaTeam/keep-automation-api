@@ -2,13 +2,25 @@
 
 - user tier  -> the existing identity provider. Only a noauth shim is wired now;
   the shared identity manager is vendored later (never a second auth stack, §10.2).
-- machine tier -> GitLab secret token (verified in D15).
+- machine tier -> GitLab secret token (`X-Gitlab-Token`, verified since D15).
 - internal tier -> service token (verified in D17/D20).
 """
-from fastapi import Header
+import hmac
+import logging
 
+from fastapi import Header, HTTPException, status
+
+from src import config
+from src.bl.capp_client import CappClient, get_default_capp_client
 from src.bl.git_client import GitClient, build_gitlab_client
+from src.core.automation_events import (
+    AutomationEventPublisher,
+    get_default_event_publisher,
+)
+from src.core.reload import ReloadPublisher, get_default_reload_publisher
 from src.models.api.identity import AuthenticatedEntity
+
+logger = logging.getLogger(__name__)
 
 
 def get_git_client() -> GitClient:
@@ -27,6 +39,21 @@ def get_git_client() -> GitClient:
     return build_gitlab_client()
 
 
+def get_capp_client() -> CappClient:
+    """CAPP deploy/rollout client. Fails closed until D16 wires the real one."""
+    return get_default_capp_client()
+
+
+def get_reload_publisher() -> ReloadPublisher:
+    """Redis `reload` publisher; a no-op when REDIS_URL is unset."""
+    return get_default_reload_publisher()
+
+
+def get_event_publisher() -> AutomationEventPublisher:
+    """Automation state events for the SSE stream; a no-op without REDIS_URL."""
+    return get_default_event_publisher()
+
+
 async def get_authenticated_entity() -> AuthenticatedEntity:
     """User-tier identity. Noauth shim returns a static entity for now.
 
@@ -39,9 +66,33 @@ async def get_authenticated_entity() -> AuthenticatedEntity:
     return AuthenticatedEntity(tenant_id="keep", email="noauth@keep")
 
 
-async def verify_ci_webhook_token(x_gitlab_token: str | None = Header(default=None)):
-    """Machine-tier gate. Real GitLab-token verification lands in D15."""
-    return x_gitlab_token
+async def verify_ci_webhook_token(
+    x_gitlab_token: str | None = Header(default=None),
+) -> None:
+    """Machine-tier gate: the CI pipeline's shared secret in `X-Gitlab-Token`.
+
+    Constant-time compare (same as keep-ingestion's API key). Fails closed: with
+    `CI_WEBHOOK_TOKEN` unset every call is rejected — an unconfigured pod must
+    never accept the endpoint that flips an automation to runnable (spec §8.2).
+    Read per call, not at import, so the setting is the live one.
+
+    A dependency, so it runs before the body is parsed: an unauthenticated
+    caller gets a bare 401, never a validation report on its payload.
+    """
+    expected = config.CI_WEBHOOK_TOKEN
+    if not expected:
+        logger.error("ci-webhook rejected: CI_WEBHOOK_TOKEN is not configured")
+    if (
+        not expected
+        or x_gitlab_token is None
+        or not hmac.compare_digest(
+            x_gitlab_token.encode("utf-8"), expected.encode("utf-8")
+        )
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing CI webhook token",
+        )
 
 
 async def verify_service_token(authorization: str | None = Header(default=None)):

@@ -17,6 +17,7 @@ from src.exceptions import (
     AutomationBuildingError,
     AutomationNotFoundError,
     AutomationValidationError,
+    CappUnavailableError,
     ScriptRepoUnavailableError,
 )
 
@@ -125,6 +126,19 @@ def get_app() -> FastAPI:
         return JSONResponse(
             status_code=503,
             content={"detail": "Script repository is unavailable; retry shortly"},
+        )
+
+    @app.exception_handler(CappUnavailableError)
+    async def capp_unavailable_handler(
+        request: Request, exc: CappUnavailableError
+    ) -> JSONResponse:
+        # A CAPP deploy/rollout failed before the cutover committed: the row is
+        # still `building` under its lock and the old digest keeps serving, so
+        # the webhook is safe to redeliver. The exception text is never echoed
+        # (it must not, but could, carry CAPP identity detail — spec §3.4).
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "Execution platform is unavailable; retry shortly"},
         )
 
     # Health / root
