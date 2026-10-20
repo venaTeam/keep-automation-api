@@ -42,11 +42,17 @@ from uuid import UUID
 
 from sqlalchemy import select, update
 
+from src import config
 from src.bl.capp_client import CappClient, CappDeployment
+from src.contracts.validation_errors import ErrorCode, FieldError
 from src.core.automation_events import AutomationEventPublisher
 from src.core.db import get_session
 from src.core.reload import ReloadPublisher
-from src.exceptions import AutomationNotFoundError
+from src.exceptions import (
+    AutomationNotFoundError,
+    AutomationValidationError,
+    CappUnavailableError,
+)
 from src.models.api.ci_webhook import (
     BuildOutcome,
     CiWebhookIn,
@@ -116,6 +122,42 @@ def _build_event(automation: Automation, commit_sha: str) -> dict:
     }
 
 
+def _require_own_image(event: CiWebhookIn) -> None:
+    """The image must come from this automation's own repository.
+
+    The webhook token is one secret shared by every pipeline, and commit SHAs
+    are readable by anyone with repo access — so without this, any token holder
+    could cut a building automation over to an arbitrary image (or another
+    automation's) in that automation's wallet, with its secrets mounted.
+    """
+    prefix = config.AUTOMATION_IMAGE_REPOSITORY.rstrip("/")
+    if not prefix:
+        logger.error(
+            "ci-webhook refused: AUTOMATION_IMAGE_REPOSITORY is not configured "
+            "(automation=%s)",
+            event.automation_id,
+        )
+        raise CappUnavailableError("image repository not configured")
+    repository = event.image.split("@", 1)[0]
+    if repository != f"{prefix}/{event.automation_id}":
+        logger.warning(
+            "ci-webhook refused: image repository %r is not this automation's "
+            "(automation=%s sha=%s)",
+            repository,
+            event.automation_id,
+            event.commit_sha,
+        )
+        raise AutomationValidationError(
+            [
+                FieldError(
+                    field="image",
+                    code=ErrorCode.INVALID_VALUE,
+                    message="image must be built in this automation's repository",
+                )
+            ]
+        )
+
+
 def apply_build_result(
     event: CiWebhookIn,
     capp: CappClient,
@@ -138,18 +180,34 @@ def apply_build_result(
     if event.status == BuildOutcome.FAILED:
         return _record_failure(event, events)
 
+    _require_own_image(event)
+
     # Phase 2 — deploy (first build) or roll out (edit), no connection held.
     # Raises CappUnavailableError → 503 with the row untouched.
     created: CappDeployment | None = None
-    if target.capp_deployment_id is None:
-        created = capp.create_deployment(
-            automation_id=event.automation_id,
-            wallet=target.wallet,
-            image=event.image,
-            secret_refs=[target.secret_name] if target.secret_name else [],
+    operation = "create" if target.capp_deployment_id is None else "rollout"
+    try:
+        if target.capp_deployment_id is None:
+            created = capp.create_deployment(
+                automation_id=event.automation_id,
+                wallet=target.wallet,
+                image=event.image,
+                secret_refs=[target.secret_name] if target.secret_name else [],
+            )
+        else:
+            capp.rollout(deployment_id=target.capp_deployment_id, image=event.image)
+    except CappUnavailableError as exc:
+        # The only server-side trace of a stuck build: the 503 handler logs
+        # nothing. Type name only — the text must never reach logs (§3.4).
+        logger.warning(
+            "ci-webhook CAPP %s failed (%s): automation=%s sha=%s; build stays "
+            "locked, old digest serving",
+            operation,
+            type(exc).__name__,
+            event.automation_id,
+            event.commit_sha,
         )
-    else:
-        capp.rollout(deployment_id=target.capp_deployment_id, image=event.image)
+        raise
 
     # Phase 3 — atomic cutover, admission re-checked under the row lock.
     with get_session() as session:

@@ -8,6 +8,9 @@ from collections.abc import Mapping
 
 # Service
 KEEP_VERSION = os.environ.get("KEEP_VERSION", "0.1.0")
+# Root log level. Without it the service's INFO lines (DB target, build
+# cutovers) are dropped by Python's last-resort handler (WARNING+ only).
+LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 HOST = os.environ.get("KEEP_AUTOMATION_API_HOST", "0.0.0.0")
 PORT = int(os.environ.get("KEEP_AUTOMATION_API_PORT", "8080"))
 
@@ -15,7 +18,9 @@ PORT = int(os.environ.get("KEEP_AUTOMATION_API_PORT", "8080"))
 # Only "noauth" is wired in the skeleton; the shared identity manager is vendored later.
 AUTH_TYPE = os.environ.get("AUTH_TYPE", "noauth").lower()
 
-# Tier tokens (placeholders — real values from A0; verification wired in D15/D17/D20).
+# Tier tokens (values from A0). CI_WEBHOOK_TOKEN is enforced since D15 and fails
+# closed: empty = every CI webhook is rejected. INTERNAL_SERVICE_TOKEN is still a
+# placeholder until D17/D20 verify it.
 CI_WEBHOOK_TOKEN = os.environ.get("CI_WEBHOOK_TOKEN", "")
 INTERNAL_SERVICE_TOKEN = os.environ.get("INTERNAL_SERVICE_TOKEN", "")
 
@@ -144,3 +149,16 @@ BUILD_LOCK_TIMEOUT_SECONDS = int(
 AUTOMATION_EVENTS_CHANNEL = os.environ.get(
     "AUTOMATION_EVENTS_CHANNEL", "automation-events"
 )
+
+# CI webhook (D15) — the image a success webhook may cut over to must live at
+# `{AUTOMATION_IMAGE_REPOSITORY}/{automation_id}@sha256:…`: the docker
+# repository prefix CI pushes per-automation images under (A0/F23; the same
+# registry path D18's ARTIFACTORY_* settings point at). Binding the image to the
+# automation means one pipeline's token cannot deploy an arbitrary image — or
+# another automation's — into a wallet with that wallet's secrets mounted.
+# Empty = every success webhook is refused with 503 (fail closed).
+AUTOMATION_IMAGE_REPOSITORY = os.environ.get("AUTOMATION_IMAGE_REPOSITORY", "")
+# Largest webhook body accepted. Checked from Content-Length *before* the body is
+# read, together with the token, so an unauthenticated or oversized request
+# never gets buffered. A real payload is well under 1 KiB.
+CI_WEBHOOK_MAX_BODY_BYTES = int(os.environ.get("CI_WEBHOOK_MAX_BODY_BYTES", "16384"))

@@ -1,4 +1,5 @@
 """CI webhook (D15, spec §8.2, §5.1): token gate, cutover, failure, idempotency."""
+import logging
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
@@ -14,15 +15,16 @@ from src.api.deps import (
     get_git_client,
     get_reload_publisher,
 )
+from src.bl import builds
 from src.bl.capp_client import InMemoryCappClient
 from src.bl.git_client import InMemoryGitClient
 from src.main import get_app
+from src.models.api.ci_webhook import CiWebhookIn
 from tests.conftest import TENANT
 
 TOKEN = "ci-secret-token"
 AUTH = {"X-Gitlab-Token": TOKEN}
-IMAGE_V1 = "artifactory.test/automations/a@sha256:" + "1" * 64
-IMAGE_V2 = "artifactory.test/automations/a@sha256:" + "2" * 64
+REPOSITORY = "artifactory.test/automations"
 
 AUTOMATION = {
     "name": "restart-payments",
@@ -34,6 +36,11 @@ AUTOMATION = {
         {"field": "application", "value": "payments"},
     ],
 }
+
+
+def image(automation_id: str, version: int = 1) -> str:
+    """A digest-pinned image in the automation's own repository."""
+    return f"{REPOSITORY}/{automation_id}@sha256:" + str(version) * 64
 
 
 class RecordingReload:
@@ -59,8 +66,8 @@ class Harness:
         self.reload = reload
         self.events = events
 
-    def create(self) -> dict:
-        resp = self.client.post("/automations", json=AUTOMATION)
+    def create(self, **overrides) -> dict:
+        resp = self.client.post("/automations", json={**AUTOMATION, **overrides})
         assert resp.status_code == 201
         return resp.json()
 
@@ -74,10 +81,18 @@ class Harness:
     def webhook(self, payload: dict, headers: dict | None = AUTH):
         return self.client.post("/internal/ci-webhook", json=payload, headers=headers)
 
+    def counts(self) -> tuple:
+        return list(self.capp.calls), self.reload.count, len(self.events.events)
+
+
+@pytest.fixture(autouse=True)
+def webhook_config(monkeypatch):
+    monkeypatch.setattr(config, "CI_WEBHOOK_TOKEN", TOKEN)
+    monkeypatch.setattr(config, "AUTOMATION_IMAGE_REPOSITORY", REPOSITORY)
+
 
 @pytest.fixture()
-def harness(test_engine, monkeypatch):
-    monkeypatch.setattr(config, "CI_WEBHOOK_TOKEN", TOKEN)
+def harness(test_engine):
     app = get_app()
     git = InMemoryGitClient()
     capp = InMemoryCappClient()
@@ -114,13 +129,14 @@ def revisions(test_engine, automation_id: str) -> list[dict]:
         ]
 
 
-def success(automation_id: str, sha: str, image: str = IMAGE_V1) -> dict:
+def success(automation_id: str, sha: str, version: int = 1, **overrides) -> dict:
     return {
         "automation_id": automation_id,
         "commit_sha": sha,
         "status": "success",
-        "image": image,
+        "image": image(automation_id, version),
         "contract_version": "1",
+        **overrides,
     }
 
 
@@ -128,15 +144,20 @@ def failed(automation_id: str, sha: str) -> dict:
     return {"automation_id": automation_id, "commit_sha": sha, "status": "failed"}
 
 
+def assert_lock_armed(automation: dict) -> None:
+    assert automation["build_state"] == "building"
+    remaining = automation["build_lock_deadline"] - datetime.now(timezone.utc)
+    full = timedelta(seconds=config.BUILD_LOCK_TIMEOUT_SECONDS)
+    assert full - timedelta(minutes=1) < remaining <= full
+
+
 # --- build lock armed by authoring -------------------------------------------
 
 def test_create_arms_build_lock_with_commit_sha(harness, test_engine):
     created = harness.create()
     automation = row(test_engine, created["id"])
-    assert automation["build_state"] == "building"
+    assert_lock_armed(automation)
     assert automation["building_sha"] == revisions(test_engine, created["id"])[0]["git_sha"]
-    remaining = automation["build_lock_deadline"] - datetime.now(timezone.utc)
-    assert timedelta(minutes=29) < remaining <= timedelta(minutes=30)
 
 
 # --- token gate ----------------------------------------------------------------
@@ -155,6 +176,13 @@ def test_bad_token_is_401_and_changes_nothing(harness, test_engine, headers):
     assert harness.capp.calls == []
 
 
+def test_wrong_token_is_logged(harness, caplog):
+    with caplog.at_level(logging.WARNING):
+        harness.webhook(success(str(uuid4()), "a" * 40), headers={"X-Gitlab-Token": "x"})
+    assert "does not match" in caplog.text
+    assert TOKEN not in caplog.text
+
+
 def test_unconfigured_token_fails_closed(harness, test_engine, monkeypatch):
     monkeypatch.setattr(config, "CI_WEBHOOK_TOKEN", "")
     created = harness.create()
@@ -164,11 +192,38 @@ def test_unconfigured_token_fails_closed(harness, test_engine, monkeypatch):
         assert harness.webhook(success(created["id"], sha), headers=headers).status_code == 401
 
 
-def test_auth_is_checked_before_the_body(harness):
-    # An unauthenticated caller learns nothing about the payload schema.
-    resp = harness.webhook({"garbage": True}, headers=None)
+def test_auth_is_checked_before_the_body_is_read(harness):
+    # Malformed JSON without a token: a 401, not a JSON-decode 400 — the body
+    # is never read for an unauthenticated caller.
+    resp = harness.client.post(
+        "/internal/ci-webhook",
+        content=b"{not json",
+        headers={"Content-Type": "application/json"},
+    )
     assert resp.status_code == 401
     assert "errors" not in resp.json()
+
+
+def test_oversized_body_is_413_before_read(harness, monkeypatch):
+    monkeypatch.setattr(config, "CI_WEBHOOK_MAX_BODY_BYTES", 64)
+    resp = harness.client.post(
+        "/internal/ci-webhook",
+        content=b"x" * 65,
+        headers={**AUTH, "Content-Type": "application/json"},
+    )
+    assert resp.status_code == 413
+
+
+def test_missing_content_length_is_411(harness):
+    def chunks():
+        yield b"{}"
+
+    resp = harness.client.post(
+        "/internal/ci-webhook",
+        content=chunks(),
+        headers={**AUTH, "Content-Type": "application/json"},
+    )
+    assert resp.status_code == 411
 
 
 # --- payload validation --------------------------------------------------------
@@ -185,8 +240,14 @@ def test_success_without_image_or_contract_version_is_400(harness):
 @pytest.mark.parametrize(
     "overrides, field",
     [
-        ({"image": "artifactory.test/automations/a:latest"}, "image"),
+        ({"image": REPOSITORY + "/a:latest"}, "image"),
+        ({"image": REPOSITORY + "/a@sha256:" + "1" * 64 + "\n"}, "image"),
+        ({"image": "Artifactory.test/a@sha256:" + "1" * 64}, "image"),
         ({"commit_sha": "not-a-sha"}, "commit_sha"),
+        ({"commit_sha": "A" * 40}, "commit_sha"),
+        ({"commit_sha": "a" * 40 + "\n"}, "commit_sha"),
+        ({"contract_version": " "}, "contract_version"),
+        ({"contract_version": "v" * 65}, "contract_version"),
         ({"status": "cancelled"}, "status"),
         ({"automation_id": "nope"}, "automation_id"),
     ],
@@ -198,14 +259,47 @@ def test_malformed_fields_are_400_invalid_value(harness, overrides, field):
     assert any(e["field"] == field and e["code"] == "invalid_value" for e in resp.json()["errors"])
 
 
-def test_failure_payload_needs_no_image(harness):
-    created = harness.create()
-    resp = harness.webhook(failed(created["id"], "a" * 40))
-    assert resp.status_code == 200
+def test_sha256_repository_commit_ids_are_accepted():
+    CiWebhookIn(**success(str(uuid4()), "b" * 64))
+
+
+def test_failure_payload_ignores_image():
+    event = CiWebhookIn(**{**failed(str(uuid4()), "a" * 40), "image": "garbage"})
+    assert event.image == "garbage"
 
 
 def test_unknown_automation_is_404(harness):
     assert harness.webhook(success(str(uuid4()), "a" * 40)).status_code == 404
+
+
+# --- image binding --------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "foreign_image",
+    [
+        "evil.example/x@sha256:" + "1" * 64,
+        f"{REPOSITORY}/{uuid4()}@sha256:" + "1" * 64,  # another automation's
+    ],
+    ids=["foreign-registry", "other-automation"],
+)
+def test_image_from_another_repository_is_refused(harness, test_engine, foreign_image):
+    created = harness.create()
+    sha = row(test_engine, created["id"])["building_sha"]
+
+    resp = harness.webhook(success(created["id"], sha, image=foreign_image))
+
+    assert resp.status_code == 400
+    assert resp.json()["errors"][0]["field"] == "image"
+    assert harness.capp.calls == []
+    assert row(test_engine, created["id"])["build_state"] == "building"
+
+
+def test_unconfigured_image_repository_fails_closed(harness, test_engine, monkeypatch):
+    monkeypatch.setattr(config, "AUTOMATION_IMAGE_REPOSITORY", "")
+    created = harness.create()
+    sha = row(test_engine, created["id"])["building_sha"]
+    assert harness.webhook(success(created["id"], sha)).status_code == 503
+    assert harness.capp.calls == []
 
 
 # --- first build ------------------------------------------------------------
@@ -213,16 +307,17 @@ def test_unknown_automation_is_404(harness):
 def test_first_build_success_deploys_and_cuts_over(harness, test_engine):
     created = harness.create()
     sha = row(test_engine, created["id"])["building_sha"]
+    built = image(created["id"])
 
     resp = harness.webhook(success(created["id"], sha))
 
     assert resp.status_code == 200
     assert resp.json() == {"status": "applied"}
     assert harness.capp.calls == [
-        ("create", created["id"], "payments-wallet", IMAGE_V1, ("payments-secret",))
+        ("create", created["id"], "payments-wallet", built, ("payments-secret",))
     ]
     automation = row(test_engine, created["id"])
-    assert automation["active_digest"] == IMAGE_V1
+    assert automation["active_digest"] == built
     assert automation["contract_version"] == "1"
     assert automation["capp_deployment_id"] == f"capp-{created['id']}"
     assert automation["deployment_url"].endswith(created["id"])
@@ -232,7 +327,7 @@ def test_first_build_success_deploys_and_cuts_over(harness, test_engine):
     # First build lands inactive — "ready to enable", never auto-armed.
     assert automation["matching_state"] == "inactive"
     assert revisions(test_engine, created["id"]) == [
-        {"action": "create", "git_sha": sha, "resulting_digest": IMAGE_V1}
+        {"action": "create", "git_sha": sha, "resulting_digest": built}
     ]
     assert harness.reload.count == 1
     assert harness.events.events == [
@@ -243,9 +338,16 @@ def test_first_build_success_deploys_and_cuts_over(harness, test_engine):
             "commit_sha": sha,
             "build_state": "idle",
             "matching_state": "inactive",
-            "active_digest": IMAGE_V1,
+            "active_digest": built,
         }
     ]
+
+
+def test_first_build_without_secret_sends_no_secret_refs(harness, test_engine):
+    created = harness.create(secret_name=None)
+    sha = row(test_engine, created["id"])["building_sha"]
+    harness.webhook(success(created["id"], sha))
+    assert harness.capp.calls[0][-1] == ()
 
 
 def test_first_build_failure_marks_build_failed(harness, test_engine):
@@ -263,9 +365,35 @@ def test_first_build_failure_marks_build_failed(harness, test_engine):
     assert automation["build_lock_deadline"] is None
     assert harness.capp.calls == []
     assert harness.reload.count == 0
-    assert harness.events.events[-1]["build_state"] == "build_failed"
-    # The author can retry with an edit: the mid-build 409 no longer applies.
+    assert harness.events.events == [
+        {
+            "type": "build",
+            "automation_id": created["id"],
+            "tenant_id": TENANT,
+            "commit_sha": sha,
+            "build_state": "build_failed",
+            "matching_state": "inactive",
+            "active_digest": None,
+        }
+    ]
+
+
+def test_retry_after_failed_first_build_creates_the_deployment(harness, test_engine):
+    created = harness.create()
+    harness.webhook(failed(created["id"], row(test_engine, created["id"])["building_sha"]))
+
+    # The author retries with an edit: the mid-build 409 no longer applies,
+    # and the lock is re-armed for the new commit.
     harness.edit(created["id"])
+    automation = row(test_engine, created["id"])
+    assert_lock_armed(automation)
+    sha = automation["building_sha"]
+    assert sha == revisions(test_engine, created["id"])[-1]["git_sha"]
+
+    assert harness.webhook(success(created["id"], sha)).json() == {"status": "applied"}
+    # Still no deployment existed, so this build creates it (not a rollout).
+    assert [c[0] for c in harness.capp.calls] == ["create"]
+    assert row(test_engine, created["id"])["capp_deployment_id"] == f"capp-{created['id']}"
 
 
 # --- edits --------------------------------------------------------------------
@@ -277,25 +405,37 @@ def _built(harness, test_engine) -> str:
     return created["id"]
 
 
+def test_edit_arms_build_lock_with_new_sha(harness, test_engine):
+    automation_id = _built(harness, test_engine)
+    harness.edit(automation_id)
+    automation = row(test_engine, automation_id)
+    assert_lock_armed(automation)
+    assert automation["building_sha"] == revisions(test_engine, automation_id)[-1]["git_sha"]
+
+
 def test_edit_build_success_rolls_out_existing_deployment(harness, test_engine):
     automation_id = _built(harness, test_engine)
     harness.edit(automation_id)
     sha = row(test_engine, automation_id)["building_sha"]
+    new_image = image(automation_id, 2)
 
-    resp = harness.webhook(success(automation_id, sha, IMAGE_V2))
+    resp = harness.webhook(success(automation_id, sha, 2))
 
     assert resp.json() == {"status": "applied"}
-    assert harness.capp.calls[-1] == ("rollout", f"capp-{automation_id}", IMAGE_V2)
+    assert harness.capp.calls[-1] == ("rollout", f"capp-{automation_id}", new_image)
     assert len([c for c in harness.capp.calls if c[0] == "create"]) == 1
     automation = row(test_engine, automation_id)
-    assert automation["active_digest"] == IMAGE_V2
+    assert automation["active_digest"] == new_image
     assert automation["capp_deployment_id"] == f"capp-{automation_id}"
     assert automation["build_state"] == "idle"
     assert revisions(test_engine, automation_id)[-1] == {
         "action": "edit",
         "git_sha": sha,
-        "resulting_digest": IMAGE_V2,
+        "resulting_digest": new_image,
     }
+    assert harness.reload.count == 2
+    assert harness.events.events[-1]["active_digest"] == new_image
+    assert harness.events.events[-1]["tenant_id"] == TENANT
 
 
 def test_edit_of_active_automation_keeps_it_active(harness, test_engine):
@@ -307,10 +447,11 @@ def test_edit_of_active_automation_keeps_it_active(harness, test_engine):
         )
     harness.edit(automation_id)
     sha = row(test_engine, automation_id)["building_sha"]
-    harness.webhook(success(automation_id, sha, IMAGE_V2))
+    harness.webhook(success(automation_id, sha, 2))
     automation = row(test_engine, automation_id)
     assert automation["matching_state"] == "active"
-    assert automation["active_digest"] == IMAGE_V2
+    assert automation["active_digest"] == image(automation_id, 2)
+    assert harness.events.events[-1]["matching_state"] == "active"
 
 
 def test_failed_edit_build_keeps_old_digest_serving(harness, test_engine):
@@ -324,22 +465,24 @@ def test_failed_edit_build_keeps_old_digest_serving(harness, test_engine):
     assert resp.json() == {"status": "applied"}
     automation = row(test_engine, automation_id)
     assert automation["build_state"] == "build_failed"
-    assert automation["active_digest"] == IMAGE_V1
+    assert automation["active_digest"] == image(automation_id)
     assert harness.capp.calls == calls_before
-    assert harness.capp.images[f"capp-{automation_id}"] == IMAGE_V1
+    assert harness.capp.images[f"capp-{automation_id}"] == image(automation_id)
 
 
 # --- CAPP failure -------------------------------------------------------------
 
-def test_capp_failure_is_503_and_leaves_build_locked(harness, test_engine):
+def test_capp_failure_is_503_logged_and_leaves_build_locked(harness, test_engine, caplog):
     created = harness.create()
     before = row(test_engine, created["id"])
     harness.capp.fail = True
 
-    resp = harness.webhook(success(created["id"], before["building_sha"]))
+    with caplog.at_level(logging.WARNING):
+        resp = harness.webhook(success(created["id"], before["building_sha"]))
 
     assert resp.status_code == 503
     assert "CAPP" not in resp.text
+    assert f"automation={created['id']}" in caplog.text
     after = row(test_engine, created["id"])
     for column in ("build_state", "building_sha", "build_lock_deadline", "active_digest",
                    "capp_deployment_id"):
@@ -351,7 +494,7 @@ def test_capp_failure_is_503_and_leaves_build_locked(harness, test_engine):
     harness.capp.fail = False
     resp = harness.webhook(success(created["id"], before["building_sha"]))
     assert resp.json() == {"status": "applied"}
-    assert row(test_engine, created["id"])["active_digest"] == IMAGE_V1
+    assert row(test_engine, created["id"])["active_digest"] == image(created["id"])
 
 
 def test_failed_rollout_keeps_old_digest(harness, test_engine):
@@ -359,17 +502,19 @@ def test_failed_rollout_keeps_old_digest(harness, test_engine):
     harness.edit(automation_id)
     sha = row(test_engine, automation_id)["building_sha"]
     harness.capp.fail = True
+    _, reloads, events = harness.counts()
 
-    assert harness.webhook(success(automation_id, sha, IMAGE_V2)).status_code == 503
+    assert harness.webhook(success(automation_id, sha, 2)).status_code == 503
     automation = row(test_engine, automation_id)
-    assert automation["active_digest"] == IMAGE_V1
+    assert automation["active_digest"] == image(automation_id)
     assert automation["build_state"] == "building"
+    assert harness.reload.count == reloads
+    assert len(harness.events.events) == events
 
 
-def test_production_default_capp_client_fails_closed(test_engine, monkeypatch):
+def test_production_default_capp_client_fails_closed(test_engine):
     # Until D16 the real client is absent: the webhook must 503, never cut over
     # to an image no deployment serves.
-    monkeypatch.setattr(config, "CI_WEBHOOK_TOKEN", TOKEN)
     app = get_app()
     git = InMemoryGitClient()
     app.dependency_overrides[get_git_client] = lambda: git
@@ -393,16 +538,14 @@ def test_replayed_success_is_a_noop(harness, test_engine):
     sha = row(test_engine, created["id"])["building_sha"]
     harness.webhook(success(created["id"], sha))
     state = row(test_engine, created["id"])
-    calls, reloads, events = list(harness.capp.calls), harness.reload.count, len(harness.events.events)
+    before = harness.counts()
 
     resp = harness.webhook(success(created["id"], sha))
 
     assert resp.status_code == 200
     assert resp.json() == {"status": "ignored", "reason": "not_building"}
     assert row(test_engine, created["id"]) == state
-    assert harness.capp.calls == calls
-    assert harness.reload.count == reloads
-    assert len(harness.events.events) == events
+    assert harness.counts() == before
 
 
 def test_replayed_failure_after_success_cannot_undo_cutover(harness, test_engine):
@@ -421,12 +564,12 @@ def test_superseded_sha_is_ignored(harness, test_engine):
     calls = list(harness.capp.calls)
 
     # A late webhook for the earlier commit must not cut the edit's build over.
-    resp = harness.webhook(success(automation_id, first_sha, IMAGE_V2))
+    resp = harness.webhook(success(automation_id, first_sha, 2))
 
     assert resp.json() == {"status": "ignored", "reason": "sha_mismatch"}
     automation = row(test_engine, automation_id)
     assert automation["build_state"] == "building"
-    assert automation["active_digest"] == IMAGE_V1
+    assert automation["active_digest"] == image(automation_id)
     assert harness.capp.calls == calls
 
 
@@ -448,34 +591,27 @@ def test_deleting_automation_is_never_deployed(harness, test_engine, matching_st
 # --- connection discipline + races (BL level) ----------------------------------
 
 class _ProbingCapp(InMemoryCappClient):
-    """Records how many pooled connections are checked out during each call."""
+    """Records pooled connections checked out during each call; can run a
+    side effect mid-call to simulate a concurrent actor."""
 
-    def __init__(self, engine, on_create=None):
+    def __init__(self, engine, during_call=None):
         super().__init__()
         self.engine = engine
-        self.on_create = on_create
+        self.during_call = during_call
         self.checked_out: list[int] = []
 
     def create_deployment(self, **kwargs):
         self.checked_out.append(self.engine.pool.checkedout())
-        if self.on_create is not None:
-            self.on_create()
+        if self.during_call is not None:
+            self.during_call()
         return super().create_deployment(**kwargs)
 
-    def rollout(self, **kwargs):
-        self.checked_out.append(self.engine.pool.checkedout())
-        return super().rollout(**kwargs)
 
-
-def _event(automation_id: str, sha: str):
-    from src.models.api.ci_webhook import CiWebhookIn
-
+def _event(automation_id: str, sha: str) -> CiWebhookIn:
     return CiWebhookIn(**success(automation_id, sha))
 
 
 def test_no_db_connection_is_held_across_the_capp_call(harness, test_engine):
-    from src.bl import builds
-
     created = harness.create()
     sha = row(test_engine, created["id"])["building_sha"]
     capp = _ProbingCapp(test_engine)
@@ -484,8 +620,6 @@ def test_no_db_connection_is_held_across_the_capp_call(harness, test_engine):
 
 
 def test_concurrent_duplicate_delivery_cuts_over_once(harness, test_engine):
-    from src.bl import builds
-
     created = harness.create()
     sha = row(test_engine, created["id"])["building_sha"]
     rival_events = RecordingEvents()
@@ -499,10 +633,34 @@ def test_concurrent_duplicate_delivery_cuts_over_once(harness, test_engine):
     events = RecordingEvents()
     reload = RecordingReload()
     result = builds.apply_build_result(
-        _event(created["id"], sha), _ProbingCapp(test_engine, on_create=rival), reload, events
+        _event(created["id"], sha), _ProbingCapp(test_engine, rival), reload, events
     )
 
     assert result.status == "ignored"
     assert len(rival_events.events) == 1
     assert events.events == [] and reload.count == 0
-    assert row(test_engine, created["id"])["active_digest"] == IMAGE_V1
+    assert row(test_engine, created["id"])["active_digest"] == image(created["id"])
+
+
+def test_deletion_started_during_capp_call_is_not_cut_over(harness, test_engine):
+    created = harness.create()
+    sha = row(test_engine, created["id"])["building_sha"]
+
+    def start_deletion():
+        with test_engine.begin() as conn:
+            conn.execute(
+                text("UPDATE automations SET matching_state = 'deleting' WHERE id = :id"),
+                {"id": created["id"]},
+            )
+
+    events = RecordingEvents()
+    reload = RecordingReload()
+    result = builds.apply_build_result(
+        _event(created["id"], sha), _ProbingCapp(test_engine, start_deletion), reload, events
+    )
+
+    assert (result.status, result.reason) == ("ignored", "deleting")
+    automation = row(test_engine, created["id"])
+    assert automation["active_digest"] is None
+    assert automation["capp_deployment_id"] is None
+    assert events.events == [] and reload.count == 0

@@ -13,11 +13,15 @@ from uuid import UUID
 from pydantic import BaseModel, validator
 from pydantic.errors import MissingError
 
+# Patterns are applied with `fullmatch` — `$` would also accept a trailing
+# newline, which would then be stored verbatim as `active_digest`.
 # Git object id: SHA-1 (40 hex) today; SHA-256 repositories (64 hex) accepted.
-_COMMIT_SHA = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
+_COMMIT_SHA = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 # Digest-pinned image reference, `repository@sha256:<64 hex>`. Never a tag: the
-# deployment must reference the exact bytes CI scanned (spec §5.1).
-_DIGEST_REF = re.compile(r"^[^\s@]+@sha256:[0-9a-f]{64}$")
+# deployment must reference the exact bytes CI scanned (spec §5.1). The
+# repository is a docker reference (host[:port]/path, lowercase); which
+# repository is acceptable is checked against config in src/bl/builds.py.
+_DIGEST_REF = re.compile(r"[a-z0-9][a-z0-9._:/-]*@sha256:[0-9a-f]{64}")
 CONTRACT_VERSION_MAX_LENGTH = 64
 
 
@@ -38,7 +42,7 @@ class CiWebhookIn(BaseModel):
 
     @validator("commit_sha")
     def commit_sha_is_git_object_id(cls, value: str) -> str:
-        if not _COMMIT_SHA.match(value):
+        if not _COMMIT_SHA.fullmatch(value):
             raise ValueError("commit_sha must be a lowercase hex git object id")
         return value
 
@@ -48,7 +52,7 @@ class CiWebhookIn(BaseModel):
             return value
         if value is None:
             raise MissingError()
-        if not _DIGEST_REF.match(value):
+        if not _DIGEST_REF.fullmatch(value):
             raise ValueError("image must be a digest-pinned reference (repo@sha256:<hex>)")
         return value
 

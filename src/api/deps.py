@@ -5,6 +5,7 @@
 - machine tier -> GitLab secret token (`X-Gitlab-Token`, verified since D15).
 - internal tier -> service token (verified in D17/D20).
 """
+import hashlib
 import hmac
 import logging
 
@@ -66,29 +67,43 @@ async def get_authenticated_entity() -> AuthenticatedEntity:
     return AuthenticatedEntity(tenant_id="keep", email="noauth@keep")
 
 
+def ci_webhook_token_valid(x_gitlab_token: str | None) -> bool:
+    """True when `x_gitlab_token` is the configured CI webhook secret.
+
+    Fails closed: with `CI_WEBHOOK_TOKEN` unset nothing is valid — an
+    unconfigured pod must never accept the endpoint that flips an automation to
+    runnable (spec §8.2). Read per call, not at import, so the setting is the
+    live one. Both sides are hashed before the constant-time compare so the
+    comparison does not even leak the token's length.
+    """
+    expected = config.CI_WEBHOOK_TOKEN
+    if not expected:
+        logger.error("ci-webhook rejected: CI_WEBHOOK_TOKEN is not configured")
+        return False
+    if x_gitlab_token is None:
+        return False
+    if not hmac.compare_digest(
+        hashlib.sha256(x_gitlab_token.encode("utf-8")).digest(),
+        hashlib.sha256(expected.encode("utf-8")).digest(),
+    ):
+        # A rotation done on one side only shows up here, not as silence.
+        logger.warning("ci-webhook rejected: X-Gitlab-Token does not match")
+        return False
+    return True
+
+
 async def verify_ci_webhook_token(
     x_gitlab_token: str | None = Header(default=None),
 ) -> None:
     """Machine-tier gate: the CI pipeline's shared secret in `X-Gitlab-Token`.
 
-    Constant-time compare (same as keep-ingestion's API key). Fails closed: with
-    `CI_WEBHOOK_TOKEN` unset every call is rejected — an unconfigured pod must
-    never accept the endpoint that flips an automation to runnable (spec §8.2).
-    Read per call, not at import, so the setting is the live one.
-
-    A dependency, so it runs before the body is parsed: an unauthenticated
-    caller gets a bare 401, never a validation report on its payload.
+    `src/api/ci_webhook_guard.py` applies the same check as ASGI middleware
+    *before the body is read* (a dependency runs only after FastAPI has
+    buffered and JSON-decoded it); this dependency keeps the tier's gate on the
+    router itself, so the route stays protected if the middleware is ever
+    unmounted.
     """
-    expected = config.CI_WEBHOOK_TOKEN
-    if not expected:
-        logger.error("ci-webhook rejected: CI_WEBHOOK_TOKEN is not configured")
-    if (
-        not expected
-        or x_gitlab_token is None
-        or not hmac.compare_digest(
-            x_gitlab_token.encode("utf-8"), expected.encode("utf-8")
-        )
-    ):
+    if not ci_webhook_token_valid(x_gitlab_token):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or missing CI webhook token",

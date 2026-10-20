@@ -59,3 +59,18 @@ def test_default_is_redis_publisher_with_redis_url(monkeypatch):
     assert isinstance(
         events_module.get_default_event_publisher(), RedisAutomationEventPublisher
     )
+
+
+def test_client_built_once_for_process_lifetime():
+    built = []
+
+    def factory():
+        built.append(1)
+        return FakeRedis()
+
+    publisher = RedisAutomationEventPublisher(
+        "redis://x", "automation-events", 1.0, client_factory=factory
+    )
+    for _ in range(3):
+        publisher.publish({"type": "build"})
+    assert len(built) == 1

@@ -63,6 +63,10 @@ class RedisAutomationEventPublisher:
                         self._url,
                         socket_timeout=self._timeout,
                         socket_connect_timeout=self._timeout,
+                        # Webhooks are rare, so the pooled socket idles; a
+                        # silently dropped idle connection would otherwise
+                        # cost the next event. Ping it before reuse.
+                        health_check_interval=30,
                     )
             return self._client
 

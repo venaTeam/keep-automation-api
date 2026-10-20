@@ -81,6 +81,9 @@ automation's build finishes. Payload, responses and the SSE event shape are in
 | Env var | Default | Purpose |
 |---|---|---|
 | `CI_WEBHOOK_TOKEN` | _(empty)_ | Shared secret CI sends as `X-Gitlab-Token`. **Empty = every webhook is rejected (401)** — fail closed. |
+| `AUTOMATION_IMAGE_REPOSITORY` | _(empty)_ | Docker repository prefix CI pushes to; a success webhook's `image` must be `{prefix}/{automation_id}@sha256:…`. **Empty = every success webhook is refused (503).** |
+| `CI_WEBHOOK_MAX_BODY_BYTES` | `16384` | Checked from `Content-Length` with the token, before the body is read (`411` without one, `413` above it). |
+| `LOG_LEVEL` | `INFO` | Root log level (cutovers and build failures log at INFO, refusals at WARNING). |
 | `AUTOMATION_BUILD_LOCK_TIMEOUT_SECONDS` | `1800` | `build_lock_deadline` armed on create/edit (E21 releases past it). |
 | `REDIS_URL` | _(empty)_ | `reload` signal + automation events. Empty = both skipped (periodic reload still converges the index). |
 | `AUTOMATION_RELOAD_CHANNEL` | `reload` | Must match keep-event-handler's subscriber. |
