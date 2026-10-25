@@ -8,6 +8,8 @@
 import hashlib
 import hmac
 import logging
+import threading
+import time
 
 from fastapi import Header, HTTPException, status
 
@@ -67,6 +69,36 @@ async def get_authenticated_entity() -> AuthenticatedEntity:
     return AuthenticatedEntity(tenant_id="keep", email="noauth@keep")
 
 
+class _LogThrottle:
+    """Lets one record through per `interval_seconds`; counts the rest.
+
+    Rejected webhooks are logged so a misconfiguration is visible, but the
+    endpoint is reachable by anything that gets past the network restriction —
+    one line per rejected request would let a caller flood the logs.
+    """
+
+    def __init__(self, interval_seconds: float):
+        self._interval = interval_seconds
+        self._last: float | None = None
+        self._suppressed = 0
+        self._lock = threading.Lock()
+
+    def allow(self) -> int | None:
+        """Records swallowed since the last one let through, or None to skip."""
+        now = time.monotonic()
+        with self._lock:
+            if self._last is not None and now - self._last < self._interval:
+                self._suppressed += 1
+                return None
+            suppressed, self._suppressed, self._last = self._suppressed, 0, now
+            return suppressed
+
+
+REJECTION_LOG_INTERVAL_SECONDS = 60.0
+_unconfigured_log = _LogThrottle(REJECTION_LOG_INTERVAL_SECONDS)
+_mismatch_log = _LogThrottle(REJECTION_LOG_INTERVAL_SECONDS)
+
+
 def ci_webhook_token_valid(x_gitlab_token: str | None) -> bool:
     """True when `x_gitlab_token` is the configured CI webhook secret.
 
@@ -74,11 +106,18 @@ def ci_webhook_token_valid(x_gitlab_token: str | None) -> bool:
     unconfigured pod must never accept the endpoint that flips an automation to
     runnable (spec §8.2). Read per call, not at import, so the setting is the
     live one. Both sides are hashed before the constant-time compare so the
-    comparison does not even leak the token's length.
+    comparison does not even leak the token's length. Rejections are logged at
+    most once a minute per kind (startup also warns about an unset token).
     """
     expected = config.CI_WEBHOOK_TOKEN
     if not expected:
-        logger.error("ci-webhook rejected: CI_WEBHOOK_TOKEN is not configured")
+        suppressed = _unconfigured_log.allow()
+        if suppressed is not None:
+            logger.error(
+                "ci-webhook rejected: CI_WEBHOOK_TOKEN is not configured "
+                "(%d similar rejections suppressed)",
+                suppressed,
+            )
         return False
     if x_gitlab_token is None:
         return False
@@ -87,7 +126,13 @@ def ci_webhook_token_valid(x_gitlab_token: str | None) -> bool:
         hashlib.sha256(expected.encode("utf-8")).digest(),
     ):
         # A rotation done on one side only shows up here, not as silence.
-        logger.warning("ci-webhook rejected: X-Gitlab-Token does not match")
+        suppressed = _mismatch_log.allow()
+        if suppressed is not None:
+            logger.warning(
+                "ci-webhook rejected: X-Gitlab-Token does not match "
+                "(%d similar rejections suppressed)",
+                suppressed,
+            )
         return False
     return True
 

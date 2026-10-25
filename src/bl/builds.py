@@ -56,6 +56,7 @@ from src.exceptions import (
 from src.models.api.ci_webhook import (
     BuildOutcome,
     CiWebhookIn,
+    is_valid_repository,
     CiWebhookOut,
     CiWebhookResult,
     IgnoredReason,
@@ -122,6 +123,16 @@ def _build_event(automation: Automation, commit_sha: str) -> dict:
     }
 
 
+def configured_image_repository() -> str | None:
+    """`AUTOMATION_IMAGE_REPOSITORY` without a trailing slash, or None when it
+    is unset or could never match an image (fail closed — see
+    `is_valid_repository`; docker references are lowercase)."""
+    prefix = config.AUTOMATION_IMAGE_REPOSITORY.rstrip("/")
+    if not prefix or not is_valid_repository(prefix):
+        return None
+    return prefix
+
+
 def _require_own_image(event: CiWebhookIn) -> None:
     """The image must come from this automation's own repository.
 
@@ -130,11 +141,11 @@ def _require_own_image(event: CiWebhookIn) -> None:
     could cut a building automation over to an arbitrary image (or another
     automation's) in that automation's wallet, with its secrets mounted.
     """
-    prefix = config.AUTOMATION_IMAGE_REPOSITORY.rstrip("/")
-    if not prefix:
+    prefix = configured_image_repository()
+    if prefix is None:
         logger.error(
-            "ci-webhook refused: AUTOMATION_IMAGE_REPOSITORY is not configured "
-            "(automation=%s)",
+            "ci-webhook refused: AUTOMATION_IMAGE_REPOSITORY is unset or not a "
+            "valid lowercase docker repository (automation=%s)",
             event.automation_id,
         )
         raise CappUnavailableError("image repository not configured")
@@ -214,7 +225,23 @@ def apply_build_result(
         automation = _load(session, event.automation_id, lock=True)
         reason = _admission(automation, event.commit_sha)
         if reason is not None:
-            # A concurrent delivery of this same webhook already cut over.
+            if automation.active_digest != event.image:
+                # Not a duplicate delivery: CAPP accepted the image but the row
+                # moved on mid-call (deletion started, or the lock was
+                # released). CAPP is now ahead of the row — a rollout serves
+                # `event.image`; a first-build create left a deployment whose id
+                # was never stored. Recovery keys on `automation_id`, the
+                # deployment key (see the CappClient contract).
+                logger.warning(
+                    "ci-webhook CAPP ahead of row: %s accepted image=%s but "
+                    "admission failed at commit (reason=%s automation=%s sha=%s)",
+                    operation,
+                    event.image,
+                    reason.value,
+                    event.automation_id,
+                    event.commit_sha,
+                )
+            # Otherwise a concurrent delivery of this same webhook cut over.
             return _ignored(event, reason)
         if created is not None:
             automation.capp_deployment_id = created.deployment_id

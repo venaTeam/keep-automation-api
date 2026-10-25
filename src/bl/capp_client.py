@@ -21,6 +21,12 @@ integration"):
   two leaves a deployment whose id we never stored; the retried webhook must
   find it again, not orphan it.
 - `rollout` leaves the previous revision serving when it fails (spec §5.1).
+- CAPP can end up **ahead of the row**: if the cutover's commit-time admission
+  fails after a successful call (deletion started, or E21 released the lock,
+  mid-call), a rollout keeps serving the new image and a first-build create
+  leaves a deployment whose id was never stored. So anything that tears down
+  or reconciles a deployment (D18's delete cascade, E21) must resolve it by
+  `automation_id` — the deployment key — not only by `capp_deployment_id`.
 - Every call carries an explicit timeout and raises `CappUnavailableError` on
   any failure, with a message that never includes the identity.
 """

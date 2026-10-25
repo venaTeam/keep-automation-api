@@ -52,10 +52,13 @@ async def lifespan(app: FastAPI):
     # a misprovisioned pod is visible before CI's first red job.
     if not config.CI_WEBHOOK_TOKEN:
         logger.warning("CI_WEBHOOK_TOKEN is not set: every CI webhook will be rejected (401)")
-    if not config.AUTOMATION_IMAGE_REPOSITORY:
+    from src.bl.builds import configured_image_repository
+
+    if configured_image_repository() is None:
         logger.warning(
-            "AUTOMATION_IMAGE_REPOSITORY is not set: every successful CI build "
-            "will be refused (503) and stay building"
+            "AUTOMATION_IMAGE_REPOSITORY is unset or not a valid lowercase "
+            "docker repository: every successful CI build will be refused (503) "
+            "and stay building"
         )
     yield
     logger.info("Shutting down keep-automation-api")

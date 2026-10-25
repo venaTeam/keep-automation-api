@@ -89,6 +89,10 @@ class Harness:
 def webhook_config(monkeypatch):
     monkeypatch.setattr(config, "CI_WEBHOOK_TOKEN", TOKEN)
     monkeypatch.setattr(config, "AUTOMATION_IMAGE_REPOSITORY", REPOSITORY)
+    # The rejection-log throttles are process-wide; give every test fresh ones
+    # so a log assertion never depends on which test rejected a token first.
+    monkeypatch.setattr(deps, "_unconfigured_log", deps._LogThrottle(60))
+    monkeypatch.setattr(deps, "_mismatch_log", deps._LogThrottle(60))
 
 
 @pytest.fixture()
@@ -176,11 +180,28 @@ def test_bad_token_is_401_and_changes_nothing(harness, test_engine, headers):
     assert harness.capp.calls == []
 
 
-def test_wrong_token_is_logged(harness, caplog):
+def test_wrong_token_is_logged_at_most_once_per_window(harness, caplog):
     with caplog.at_level(logging.WARNING):
-        harness.webhook(success(str(uuid4()), "a" * 40), headers={"X-Gitlab-Token": "x"})
-    assert "does not match" in caplog.text
+        for _ in range(5):
+            harness.webhook(success(str(uuid4()), "a" * 40), headers={"X-Gitlab-Token": "x"})
+    mismatches = [r for r in caplog.records if "does not match" in r.getMessage()]
+    assert len(mismatches) == 1
     assert TOKEN not in caplog.text
+
+
+def test_unconfigured_token_is_logged_at_most_once_per_window(harness, caplog, monkeypatch):
+    monkeypatch.setattr(config, "CI_WEBHOOK_TOKEN", "")
+    with caplog.at_level(logging.ERROR):
+        for _ in range(5):
+            harness.webhook(success(str(uuid4()), "a" * 40))
+    assert len([r for r in caplog.records if "not configured" in r.getMessage()]) == 1
+
+
+def test_log_throttle_reports_what_it_suppressed(monkeypatch):
+    clock = iter([0.0, 1.0, 2.0, 61.0])
+    monkeypatch.setattr(deps.time, "monotonic", lambda: next(clock))
+    throttle = deps._LogThrottle(60)
+    assert [throttle.allow() for _ in range(4)] == [0, None, None, 2]
 
 
 def test_unconfigured_token_fails_closed(harness, test_engine, monkeypatch):
@@ -294,12 +315,26 @@ def test_image_from_another_repository_is_refused(harness, test_engine, foreign_
     assert row(test_engine, created["id"])["build_state"] == "building"
 
 
-def test_unconfigured_image_repository_fails_closed(harness, test_engine, monkeypatch):
-    monkeypatch.setattr(config, "AUTOMATION_IMAGE_REPOSITORY", "")
+@pytest.mark.parametrize(
+    "configured",
+    ["", "Artifactory.test/automations", "artifactory.test/auto mations"],
+    ids=["unset", "uppercase", "whitespace"],
+)
+def test_unusable_image_repository_fails_closed(harness, test_engine, monkeypatch, configured):
+    # A prefix no image could ever match is misconfiguration (503, retryable),
+    # not a foreign image (400) — and never a cutover.
+    monkeypatch.setattr(config, "AUTOMATION_IMAGE_REPOSITORY", configured)
     created = harness.create()
     sha = row(test_engine, created["id"])["building_sha"]
     assert harness.webhook(success(created["id"], sha)).status_code == 503
     assert harness.capp.calls == []
+
+
+def test_image_repository_trailing_slash_is_tolerated(harness, test_engine, monkeypatch):
+    monkeypatch.setattr(config, "AUTOMATION_IMAGE_REPOSITORY", REPOSITORY + "/")
+    created = harness.create()
+    sha = row(test_engine, created["id"])["building_sha"]
+    assert harness.webhook(success(created["id"], sha)).json() == {"status": "applied"}
 
 
 # --- first build ------------------------------------------------------------
@@ -619,7 +654,7 @@ def test_no_db_connection_is_held_across_the_capp_call(harness, test_engine):
     assert capp.checked_out == [0]
 
 
-def test_concurrent_duplicate_delivery_cuts_over_once(harness, test_engine):
+def test_concurrent_duplicate_delivery_cuts_over_once(harness, test_engine, caplog):
     created = harness.create()
     sha = row(test_engine, created["id"])["building_sha"]
     rival_events = RecordingEvents()
@@ -632,17 +667,20 @@ def test_concurrent_duplicate_delivery_cuts_over_once(harness, test_engine):
 
     events = RecordingEvents()
     reload = RecordingReload()
-    result = builds.apply_build_result(
-        _event(created["id"], sha), _ProbingCapp(test_engine, rival), reload, events
-    )
+    with caplog.at_level(logging.WARNING):
+        result = builds.apply_build_result(
+            _event(created["id"], sha), _ProbingCapp(test_engine, rival), reload, events
+        )
 
+    # A duplicate is harmless: no CAPP-ahead-of-row warning.
+    assert "CAPP ahead of row" not in caplog.text
     assert result.status == "ignored"
     assert len(rival_events.events) == 1
     assert events.events == [] and reload.count == 0
     assert row(test_engine, created["id"])["active_digest"] == image(created["id"])
 
 
-def test_deletion_started_during_capp_call_is_not_cut_over(harness, test_engine):
+def test_deletion_started_during_capp_call_is_not_cut_over(harness, test_engine, caplog):
     created = harness.create()
     sha = row(test_engine, created["id"])["building_sha"]
 
@@ -655,12 +693,17 @@ def test_deletion_started_during_capp_call_is_not_cut_over(harness, test_engine)
 
     events = RecordingEvents()
     reload = RecordingReload()
-    result = builds.apply_build_result(
-        _event(created["id"], sha), _ProbingCapp(test_engine, start_deletion), reload, events
-    )
+    capp = _ProbingCapp(test_engine, start_deletion)
+    with caplog.at_level(logging.WARNING):
+        result = builds.apply_build_result(_event(created["id"], sha), capp, reload, events)
 
     assert (result.status, result.reason) == ("ignored", "deleting")
     automation = row(test_engine, created["id"])
     assert automation["active_digest"] is None
     assert automation["capp_deployment_id"] is None
     assert events.events == [] and reload.count == 0
+    # CAPP is now ahead of the row: the deployment exists, keyed by
+    # automation_id, and the drift is logged for whoever reconciles it.
+    assert str(created["id"]) in capp.deployments
+    assert "CAPP ahead of row" in caplog.text
+    assert "reason=deleting" in caplog.text

@@ -21,8 +21,20 @@ _COMMIT_SHA = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 # deployment must reference the exact bytes CI scanned (spec §5.1). The
 # repository is a docker reference (host[:port]/path, lowercase); which
 # repository is acceptable is checked against config in src/bl/builds.py.
-_DIGEST_REF = re.compile(r"[a-z0-9][a-z0-9._:/-]*@sha256:[0-9a-f]{64}")
+_REPOSITORY = r"[a-z0-9][a-z0-9._:/-]*"
+_DIGEST_REF = re.compile(_REPOSITORY + r"@sha256:[0-9a-f]{64}")
 CONTRACT_VERSION_MAX_LENGTH = 64
+
+
+def is_valid_repository(value: str) -> bool:
+    """Whether `value` is a repository a digest-pinned `image` could name.
+
+    Used to vet `AUTOMATION_IMAGE_REPOSITORY`: a prefix outside this grammar
+    (e.g. with uppercase letters — docker references are lowercase) could never
+    match any image, so it is treated as unconfigured rather than silently
+    refusing every build as foreign.
+    """
+    return re.fullmatch(_REPOSITORY, value) is not None
 
 
 class BuildOutcome(str, Enum):
