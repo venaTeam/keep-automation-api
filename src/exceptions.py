@@ -54,3 +54,10 @@ class AutomationEditSupersededError(Exception):
     build lock past its deadline (E21) and the row moved on. The edit is not
     applied to the definition; the author reloads and retries.
     """
+
+
+class ScriptRepoUnavailableError(Exception):
+    """The script repository (GitLab) could not be reached or returned an error
+    — a timeout, a connection failure, or a non-404 API error. Mapped to a 503
+    so the caller can retry; the DB transaction never committed, so there is no
+    orphan automation row to reconcile."""

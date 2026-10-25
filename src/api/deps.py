@@ -15,15 +15,26 @@ from src.bl.cascade_adapters import (
     get_default_capp_deletion_client,
     get_default_registry_client,
 )
-from src.bl.git_client import GitClient, get_default_git_client
+from src.bl.git_client import GitClient, build_gitlab_client
 from src.core.reload import ReloadPublisher, get_default_reload_publisher
 from src.exceptions import LifecycleAuthenticationNotConfiguredError
 from src.models.api.identity import AuthenticatedEntity
 
 
 def get_git_client() -> GitClient:
-    """Script-repo client. In-memory stub until D14 lands the GitLab client."""
-    return get_default_git_client()
+    """Script-repo client — a fresh real GitLab client per request.
+
+    Not a process-wide singleton: python-gitlab holds a non-thread-safe
+    requests.Session and the BL runs in a threadpool, so a shared client could
+    interleave concurrent requests' commits/reads. Construction does no network
+    I/O (the project handle is lazy), so per-request creation is cheap.
+
+    `build_gitlab_client` refuses under the noauth shim and fails fast if GitLab
+    is unconfigured, so a misprovisioned pod surfaces on the first create/get
+    rather than silently dropping commits. Tests inject the in-memory stub via
+    dependency_overrides, so this GitLab path never runs under pytest.
+    """
+    return build_gitlab_client()
 
 
 def get_reload_publisher() -> ReloadPublisher:

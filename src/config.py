@@ -19,6 +19,20 @@ AUTH_TYPE = os.environ.get("AUTH_TYPE", "noauth").lower()
 CI_WEBHOOK_TOKEN = os.environ.get("CI_WEBHOOK_TOKEN", "")
 INTERNAL_SERVICE_TOKEN = os.environ.get("INTERNAL_SERVICE_TOKEN", "")
 
+# Script repository (spec §5.1) — the GitLab project `keep-automation-scripts`
+# holding one `{automation_id}/script.py` per automation. Git is authoritative
+# for script bytes; the DB stores only the path. A0 provisions these; a real run
+# must set URL + token + project or `get_git_client` fails fast (no silent stub).
+# The author identity is the single service identity the backend commits under —
+# the human actor is recorded only on `automation_revisions`, never as git author.
+GITLAB_URL = os.environ.get("GITLAB_URL", "")
+GITLAB_SCRIPTS_TOKEN = os.environ.get("GITLAB_SCRIPTS_TOKEN", "")
+GITLAB_SCRIPTS_PROJECT = os.environ.get("GITLAB_SCRIPTS_PROJECT", "")
+GITLAB_SCRIPTS_BRANCH = os.environ.get("GITLAB_SCRIPTS_BRANCH", "main")
+GITLAB_COMMIT_AUTHOR_NAME = os.environ.get("GITLAB_COMMIT_AUTHOR_NAME", "keep-automation-api")
+GITLAB_COMMIT_AUTHOR_EMAIL = os.environ.get("GITLAB_COMMIT_AUTHOR_EMAIL", "automation-api@keep")
+GITLAB_TIMEOUT_SECONDS = float(os.environ.get("GITLAB_TIMEOUT_SECONDS", "5"))
+
 # Database — the shared platform `keep` Postgres (spec §4.4). The automation
 # tables live in its `public` schema alongside `alert`, `incident` and `tenant`;
 # co-location is what makes `automations.tenant_id` an enforced FK. There is no

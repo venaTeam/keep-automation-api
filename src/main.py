@@ -21,6 +21,7 @@ from src.exceptions import (
     AutomationNotFoundError,
     AutomationValidationError,
     LifecycleAuthenticationNotConfiguredError,
+    ScriptRepoUnavailableError,
 )
 
 load_dotenv(find_dotenv())
@@ -177,6 +178,18 @@ def get_app() -> FastAPI:
                     "reload it and retry"
                 )
             },
+        )
+
+    @app.exception_handler(ScriptRepoUnavailableError)
+    async def script_repo_unavailable_handler(
+        request: Request, exc: ScriptRepoUnavailableError
+    ) -> JSONResponse:
+        # The script repo (GitLab) timed out or errored. 503, not 500: the DB
+        # transaction never committed, so no row was written — the client can
+        # safely retry the same request.
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "Script repository is unavailable; retry shortly"},
         )
 
     # Health / root

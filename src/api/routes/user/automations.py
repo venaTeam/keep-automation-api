@@ -6,10 +6,11 @@ result. Domain exceptions are NOT caught here — `src/main.py` registers one
 handler per exception, so the status and body for a failure live in a single
 place and a new route cannot forget a branch:
 
-- AutomationValidationError -> 400 with the accumulating machine-readable
+- AutomationValidationError    -> 400 with the accumulating machine-readable
   error list (automation-contracts.md §Validation errors)
-- AutomationNotFoundError   -> 404
-- AutomationBuildingError   -> 409 (mid-build submission lock, spec §8.1)
+- AutomationNotFoundError      -> 404
+- AutomationBuildingError       -> 409 (mid-build submission lock, spec §8.1)
+- ScriptRepoUnavailableError   -> 503 (git timed out/errored; retry — no row written)
 
 Every route passes `entity.tenant_id` into the BL: the caller's tenant comes
 from the session, never from the request body (spec §4.1/§8.1). An id owned by
