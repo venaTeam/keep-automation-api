@@ -38,6 +38,13 @@ integration"):
   `automation_id` — the deployment key — not only by `capp_deployment_id`.
 - Every call carries an explicit timeout and raises `CappUnavailableError` on
   any failure, with a message that never includes the identity.
+
+Open for D16: `CappUnavailableError` means "retry" (503, lock kept). A
+*permanent* rejection (e.g. an edit naming a secret the wallet lacks, if CAPP
+checks refs at rollout) handled that way keeps the row `building` — and PUT
+409ing — until E21. D16 should add a distinct rejection outcome that records
+`build_failed` and releases the lock (automation-contracts.md §CAPP
+integration).
 """
 from dataclasses import dataclass
 from typing import Protocol
@@ -90,6 +97,7 @@ class InMemoryCappClient:
     def __init__(self, fail: bool = False):
         self.fail = fail
         self.deployments: dict[str, CappDeployment] = {}
+        self.wallets: dict[str, str] = {}
         self.images: dict[str, str] = {}
         self.calls: list[tuple] = []
 
@@ -106,12 +114,24 @@ class InMemoryCappClient:
             raise CappUnavailableError("CAPP unavailable")
         key = str(automation_id)
         deployment = self.deployments.get(key)
+        if deployment is not None and self.wallets[key] != wallet:
+            # An unstored create left a deployment in the old wallet: never
+            # hand it back — tear it down and recreate in the requested one.
+            self.calls.append(("teardown", deployment.deployment_id))
+            self.images.pop(deployment.deployment_id, None)
+            deployment = CappDeployment(
+                deployment_id=f"capp-{key}-{wallet}",
+                deployment_url=f"https://{wallet}.capp.test/{key}",
+            )
+            self.deployments[key] = deployment
+            self.wallets[key] = wallet
         if deployment is None:
             deployment = CappDeployment(
                 deployment_id=f"capp-{key}",
                 deployment_url=f"https://{wallet}.capp.test/{key}",
             )
             self.deployments[key] = deployment
+            self.wallets[key] = wallet
         self.images[deployment.deployment_id] = image
         return deployment
 
