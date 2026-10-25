@@ -41,10 +41,17 @@ def test_lifecycle_auth_allows_real_identity(monkeypatch):
     )
 
 
-def test_lifecycle_route_fails_closed_under_noauth(monkeypatch):
+@pytest.mark.parametrize(
+    ("method", "suffix"),
+    [("POST", "/enable"), ("POST", "/disable"), ("DELETE", "")],
+    ids=["enable", "disable", "delete"],
+)
+def test_lifecycle_route_fails_closed_under_noauth(monkeypatch, method, suffix):
     monkeypatch.setattr(config, "AUTH_TYPE", "noauth")
     with TestClient(get_app()) as client:
-        response = client.post("/automations/00000000-0000-0000-0000-000000000000/disable")
+        response = client.request(
+            method, f"/automations/00000000-0000-0000-0000-000000000000{suffix}"
+        )
     assert response.status_code == 503
     assert "identity provider" in response.json()["detail"]
 

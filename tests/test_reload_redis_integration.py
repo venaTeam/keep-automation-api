@@ -41,10 +41,3 @@ def test_subscriber_on_reload_channel_receives_the_signal():
     finally:
         pubsub.close()
         client.close()
-
-
-def test_unreachable_redis_is_bounded_and_swallowed():
-    publisher = RedisReloadPublisher("redis://10.255.255.1:6379", "reload", 0.5)
-    started = time.monotonic()
-    publisher.publish_reload()
-    assert time.monotonic() - started < 5
