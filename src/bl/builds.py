@@ -56,10 +56,10 @@ from src.exceptions import (
 from src.models.api.ci_webhook import (
     BuildOutcome,
     CiWebhookIn,
-    is_valid_repository,
     CiWebhookOut,
     CiWebhookResult,
     IgnoredReason,
+    is_valid_repository,
 )
 from src.models.db.automation import Automation, BuildState, MatchingState
 from src.models.db.automation_revision import AutomationRevision

@@ -75,6 +75,9 @@ class _LogThrottle:
     Rejected webhooks are logged so a misconfiguration is visible, but the
     endpoint is reachable by anything that gets past the network restriction —
     one line per rejected request would let a caller flood the logs.
+
+    State is per process, so under `gunicorn -w N` the cap is N lines per
+    interval for each kind — bounded, which is the point.
     """
 
     def __init__(self, interval_seconds: float):
