@@ -65,3 +65,11 @@ def test_default_is_redis_publisher_with_redis_url(monkeypatch):
     monkeypatch.setattr(reload_module.config, "REDIS_URL", "redis://localhost:6379")
     monkeypatch.setattr(reload_module, "_default_publisher", None)
     assert isinstance(reload_module.get_default_reload_publisher(), RedisReloadPublisher)
+
+
+def test_real_client_pings_idle_connections_before_reuse():
+    # No network: from_url only builds the pool. Without the health check a
+    # connection a NAT/LB dropped while idle costs the next reload signal.
+    publisher = RedisReloadPublisher("redis://localhost:6379", "reload", 1.0)
+    client = publisher._get_client()
+    assert client.connection_pool.connection_kwargs["health_check_interval"] == 30

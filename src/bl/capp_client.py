@@ -21,6 +21,15 @@ integration"):
   two leaves a deployment whose id we never stored; the retried webhook must
   find it again, not orphan it.
 - `rollout` leaves the previous revision serving when it fails (spec §5.1).
+  It carries the image **and the current `secret_refs`** — an edit may change
+  the secret, and the deployment must mount what the row names.
+- The **wallet is fixed at create**: authoring refuses a wallet change once
+  `capp_deployment_id` is set (`namespace_immutable`), so rollout never needs
+  one. If `create_deployment` finds an existing deployment for the id in a
+  *different* wallet (reachable only via the drift below: a create whose id
+  was never stored, then a wallet edit before the next build), it must not
+  return it as-is — tear it down and recreate in the requested wallet, or
+  raise `CappUnavailableError`.
 - CAPP can end up **ahead of the row**: if the cutover's commit-time admission
   fails after a successful call (deletion started, or E21 released the lock,
   mid-call), a rollout keeps serving the new image and a first-build create
@@ -57,8 +66,11 @@ class CappClient(Protocol):
         """First successful build: create (or find) the deployment."""
         ...
 
-    def rollout(self, *, deployment_id: str, image: str) -> None:
-        """Later builds: roll the existing deployment out to `image`."""
+    def rollout(
+        self, *, deployment_id: str, image: str, secret_refs: list[str]
+    ) -> None:
+        """Later builds: roll the existing deployment out to `image`, mounting
+        `secret_refs` (the wallet never changes — see the contract above)."""
         ...
 
 
@@ -103,8 +115,10 @@ class InMemoryCappClient:
         self.images[deployment.deployment_id] = image
         return deployment
 
-    def rollout(self, *, deployment_id: str, image: str) -> None:
-        self.calls.append(("rollout", deployment_id, image))
+    def rollout(
+        self, *, deployment_id: str, image: str, secret_refs: list[str]
+    ) -> None:
+        self.calls.append(("rollout", deployment_id, image, tuple(secret_refs)))
         if self.fail:
             raise CappUnavailableError("CAPP unavailable")
         self.images[deployment_id] = image

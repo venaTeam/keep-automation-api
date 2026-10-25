@@ -7,6 +7,11 @@ import logging
 from contextlib import asynccontextmanager
 
 from dotenv import find_dotenv, load_dotenv
+
+# Before any `src` import: `src.config` reads os.environ at import time, so a
+# .env loaded after it would reach os.environ but never the settings.
+load_dotenv(find_dotenv())
+
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -22,17 +27,27 @@ from src.exceptions import (
     ScriptRepoUnavailableError,
 )
 
-load_dotenv(find_dotenv())
+
+def resolve_log_level(name: str) -> int | None:
+    """The numeric level for `name`, or None when it is not a level name."""
+    level = logging.getLevelName(name.upper())
+    return level if isinstance(level, int) else None
+
 
 # Root handler + level. Without it Python's last-resort handler prints only
 # WARNING+, so every INFO line (DB target, build cutovers) vanished in the
 # container. `force` is not set: a host that configured logging first wins.
+# An unknown LOG_LEVEL falls back to INFO: basicConfig would raise at import
+# and crash-loop every worker over a typo.
+_log_level = resolve_log_level(config.LOG_LEVEL)
 logging.basicConfig(
-    level=config.LOG_LEVEL,
+    level=_log_level if _log_level is not None else logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 
 logger = logging.getLogger(__name__)
+if _log_level is None:
+    logger.warning("LOG_LEVEL=%r is not a logging level; using INFO", config.LOG_LEVEL)
 
 
 @asynccontextmanager

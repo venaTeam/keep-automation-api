@@ -48,6 +48,7 @@ from src.exceptions import (
     AutomationValidationError,
 )
 from src.contracts.limits import TIMEOUT_SECONDS_DEFAULT, GRACE_SECONDS_DEFAULT
+from src.contracts.validation_errors import ErrorCode, FieldError
 from src.models.api.automation import AutomationIn
 from src.models.db.automation import Automation, BuildState, MatchingState
 from src.models.db.automation_revision import AutomationRevision, RevisionAction
@@ -66,6 +67,29 @@ def _validated(data: AutomationIn) -> None:
     errors = validate_automation(data)
     if errors:
         raise AutomationValidationError(errors)
+
+
+def _check_wallet_unchanged(automation: Automation, data: AutomationIn) -> None:
+    """Refuse moving a deployed automation to another wallet.
+
+    The wallet is fixed when CAPP creates the deployment; later builds only
+    roll it out to a new image (automation-contracts.md §CI webhook). Accepting
+    the change would leave the deployment running in the old wallet — its
+    budget, egress and secret store — while the row named the new one. Before
+    the first successful build there is no deployment, so the wallet is free.
+    Moving a deployed automation is delete + recreate.
+    """
+    if automation.capp_deployment_id is None or data.namespace == automation.namespace:
+        return
+    raise AutomationValidationError(
+        [
+            FieldError(
+                field="namespace",
+                code=ErrorCode.NAMESPACE_IMMUTABLE,
+                message="a deployed automation cannot move to another wallet",
+            )
+        ]
+    )
 
 
 def _scoped_get(session, tenant_id: str, automation_id: UUID) -> Automation:
@@ -151,6 +175,7 @@ def update_automation(
         automation = _scoped_get(session, tenant_id, automation_id)
         if automation.build_state == BuildState.BUILDING:
             raise AutomationBuildingError()
+        _check_wallet_unchanged(automation, data)
         script_path = automation.script_path
 
     # Phase 2 — commit to git with no DB connection held. A failure here leaves
@@ -165,6 +190,8 @@ def update_automation(
         automation = _scoped_get(session, tenant_id, automation_id)
         if automation.build_state == BuildState.BUILDING:
             raise AutomationBuildingError()
+        # A concurrent edit's build may have deployed it meanwhile.
+        _check_wallet_unchanged(automation, data)
 
         automation.name = data.name
         automation.namespace = data.namespace

@@ -7,12 +7,16 @@ worker buffer an arbitrarily large body. This pure-ASGI middleware answers
 before `receive` is ever called:
 
 - bad / missing `X-Gitlab-Token` → `401` (same check as the router dependency);
-- no usable `Content-Length` → `411` — CI always sends one, and without it the
-  size cannot be bounded up front;
+- any `Transfer-Encoding`, or no usable `Content-Length` → `411` — CI always
+  sends a plain Content-Length body, and without one the size cannot be
+  bounded up front;
 - `Content-Length` above `CI_WEBHOOK_MAX_BODY_BYTES` → `413`.
 
-The server enforces Content-Length framing, so the body cannot then exceed the
-declared size. Every other path passes straight through.
+`Transfer-Encoding` is refused even alongside a valid `Content-Length`: h11
+(uvicorn's parser without httptools) lets chunked framing win, so a small
+declared length would otherwise front an unbounded chunked body. With
+Content-Length framing alone the server stops reading at the declared size.
+Every other path passes straight through.
 """
 from starlette.datastructures import Headers
 from starlette.responses import JSONResponse
@@ -45,6 +49,8 @@ class CiWebhookGuard:
             return JSONResponse(
                 {"detail": "Invalid or missing CI webhook token"}, status_code=401
             )
+        if "transfer-encoding" in headers:
+            return JSONResponse({"detail": "Content-Length required"}, status_code=411)
         try:
             length = int(headers.get("content-length", ""))
         except ValueError:

@@ -32,6 +32,9 @@ class ErrorCode(str, Enum):
     HANDLE_BAD_ARITY = "handle_bad_arity"
     # Reserved for F25 (onboarded-wallet check); until then fires only on blank.
     NAMESPACE_INVALID = "namespace_invalid"
+    # An edit may not move a deployed automation to another wallet (rollout
+    # only swaps the image; the wallet is fixed when CAPP creates it).
+    NAMESPACE_IMMUTABLE = "namespace_immutable"
 
 
 class FieldError(BaseModel):

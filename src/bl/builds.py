@@ -24,7 +24,10 @@ deliveries of one webhook cut over once (both CAPP calls are idempotent).
 **Failure.** `build_state=build_failed`, lock released, `active_digest` and the
 deployment untouched: a first build has nothing to serve; an edit keeps serving
 the previous digest (spec §5.1). PUT is allowed again, so the author retries
-with a fresh edit.
+with a fresh edit. A failure report is bound only by `building_sha`, not by an
+image: any holder of the shared webhook token who knows an automation's id and
+building SHA can fail its build. The worst case is a forced re-edit (no image
+reaches CAPP this way); closing it needs per-pipeline tokens (open question).
 
 The matching axis is never touched here: a first build lands `inactive`
 ("ready to enable", D18 enables); an edit of an active automation simply
@@ -197,16 +200,23 @@ def apply_build_result(
     # Raises CappUnavailableError → 503 with the row untouched.
     created: CappDeployment | None = None
     operation = "create" if target.capp_deployment_id is None else "rollout"
+    secret_refs = [target.secret_name] if target.secret_name else []
     try:
         if target.capp_deployment_id is None:
             created = capp.create_deployment(
                 automation_id=event.automation_id,
                 wallet=target.wallet,
                 image=event.image,
-                secret_refs=[target.secret_name] if target.secret_name else [],
+                secret_refs=secret_refs,
             )
         else:
-            capp.rollout(deployment_id=target.capp_deployment_id, image=event.image)
+            # No wallet: it is fixed at create (authoring refuses a change once
+            # deployed). The secret can change with an edit, so it travels.
+            capp.rollout(
+                deployment_id=target.capp_deployment_id,
+                image=event.image,
+                secret_refs=secret_refs,
+            )
     except CappUnavailableError as exc:
         # The only server-side trace of a stuck build: the 503 handler logs
         # nothing. Type name only — the text must never reach logs (§3.4).

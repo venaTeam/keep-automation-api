@@ -1,15 +1,18 @@
 """CI webhook (D15, spec §8.2, §5.1): token gate, cutover, failure, idempotency."""
+import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import text
+from sqlalchemy import event, text
 
 from src import config
 from src.api import deps
+from src.api.ci_webhook_guard import CI_WEBHOOK_PATH, CiWebhookGuard
 from src.api.deps import (
+    get_authenticated_entity,
     get_capp_client,
     get_event_publisher,
     get_git_client,
@@ -20,7 +23,8 @@ from src.bl.capp_client import InMemoryCappClient
 from src.bl.git_client import InMemoryGitClient
 from src.main import get_app
 from src.models.api.ci_webhook import CiWebhookIn
-from tests.conftest import TENANT
+from src.models.api.identity import AuthenticatedEntity
+from tests.conftest import OTHER_TENANT, TENANT
 
 TOKEN = "ci-secret-token"
 AUTH = {"X-Gitlab-Token": TOKEN}
@@ -71,12 +75,22 @@ class Harness:
         assert resp.status_code == 201
         return resp.json()
 
-    def edit(self, automation_id: str) -> None:
+    def act_as(self, tenant_id: str) -> None:
+        self.client.app.dependency_overrides[get_authenticated_entity] = (
+            lambda: AuthenticatedEntity(tenant_id=tenant_id, email=f"author@{tenant_id}")
+        )
+
+    def edit(self, automation_id: str, expect: int = 200, **overrides):
         resp = self.client.put(
             f"/automations/{automation_id}",
-            json={**AUTOMATION, "script": "def handle(alert):\n    return {'v': 2}\n"},
+            json={
+                **AUTOMATION,
+                "script": "def handle(alert):\n    return {'v': 2}\n",
+                **overrides,
+            },
         )
-        assert resp.status_code == 200, resp.text
+        assert resp.status_code == expect, resp.text
+        return resp
 
     def webhook(self, payload: dict, headers: dict | None = AUTH):
         return self.client.post("/internal/ci-webhook", json=payload, headers=headers)
@@ -247,6 +261,54 @@ def test_missing_content_length_is_411(harness):
     assert resp.status_code == 411
 
 
+def guard_status(headers: dict[str, str]) -> int:
+    """Run the guard alone on raw ASGI headers (an HTTP client would normalise
+    framing headers); a request that passes through reaches a 204 app."""
+    async def downstream(scope, receive, send):
+        await send({"type": "http.response.start", "status": 204, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    async def receive():
+        raise AssertionError("the guard must answer without reading the body")
+
+    sent: list[dict] = []
+
+    async def send(message):
+        sent.append(message)
+
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": CI_WEBHOOK_PATH,
+        "query_string": b"",
+        "headers": [(k.lower().encode(), v.encode()) for k, v in headers.items()],
+    }
+    asyncio.run(CiWebhookGuard(downstream)(scope, receive, send))
+    return sent[0]["status"]
+
+
+@pytest.mark.parametrize(
+    "length, expected",
+    [("64", 204), ("65", 413), ("0", 204), ("-1", 411), ("abc", 411), (None, 411)],
+    ids=["at-limit", "over-limit", "empty", "negative", "garbage", "missing"],
+)
+def test_guard_content_length_edges(monkeypatch, length, expected):
+    monkeypatch.setattr(config, "CI_WEBHOOK_MAX_BODY_BYTES", 64)
+    headers = {**AUTH} if length is None else {**AUTH, "Content-Length": length}
+    assert guard_status(headers) == expected
+
+
+@pytest.mark.parametrize("encoding", ["chunked", "gzip, chunked", "identity"])
+def test_guard_refuses_transfer_encoding_even_with_a_small_length(encoding):
+    # h11 lets chunked framing win over Content-Length, so a small declared
+    # length must not admit an unbounded chunked body.
+    assert guard_status({**AUTH, "Content-Length": "10", "Transfer-Encoding": encoding}) == 411
+
+
+def test_guard_checks_the_token_before_framing():
+    assert guard_status({"Transfer-Encoding": "chunked"}) == 401
+
+
 # --- payload validation --------------------------------------------------------
 
 def test_success_without_image_or_contract_version_is_400(harness):
@@ -413,6 +475,19 @@ def test_first_build_failure_marks_build_failed(harness, test_engine):
     ]
 
 
+@pytest.mark.parametrize("outcome", ["success", "failed"])
+def test_build_event_carries_the_automations_own_tenant(harness, test_engine, outcome):
+    # D19 routes the event to this tenant's sessions only, so it must come from
+    # the row — never a default or the noauth tenant.
+    harness.act_as(OTHER_TENANT)
+    created = harness.create()
+    sha = row(test_engine, created["id"])["building_sha"]
+    payload = success(created["id"], sha) if outcome == "success" else failed(created["id"], sha)
+
+    assert harness.webhook(payload).json() == {"status": "applied"}
+    assert [e["tenant_id"] for e in harness.events.events] == [OTHER_TENANT]
+
+
 def test_retry_after_failed_first_build_creates_the_deployment(harness, test_engine):
     created = harness.create()
     harness.webhook(failed(created["id"], row(test_engine, created["id"])["building_sha"]))
@@ -454,23 +529,74 @@ def test_edit_build_success_rolls_out_existing_deployment(harness, test_engine):
     sha = row(test_engine, automation_id)["building_sha"]
     new_image = image(automation_id, 2)
 
-    resp = harness.webhook(success(automation_id, sha, 2))
+    resp = harness.webhook(success(automation_id, sha, 2, contract_version="2"))
 
     assert resp.json() == {"status": "applied"}
-    assert harness.capp.calls[-1] == ("rollout", f"capp-{automation_id}", new_image)
+    assert harness.capp.calls[-1] == (
+        "rollout", f"capp-{automation_id}", new_image, ("payments-secret",)
+    )
     assert len([c for c in harness.capp.calls if c[0] == "create"]) == 1
     automation = row(test_engine, automation_id)
     assert automation["active_digest"] == new_image
+    assert automation["contract_version"] == "2"
     assert automation["capp_deployment_id"] == f"capp-{automation_id}"
     assert automation["build_state"] == "idle"
-    assert revisions(test_engine, automation_id)[-1] == {
-        "action": "edit",
-        "git_sha": sha,
-        "resulting_digest": new_image,
-    }
+    # Only the edit's revision learns the new digest; the create's keeps v1.
+    create_sha = revisions(test_engine, automation_id)[0]["git_sha"]
+    assert revisions(test_engine, automation_id) == [
+        {"action": "create", "git_sha": create_sha, "resulting_digest": image(automation_id)},
+        {"action": "edit", "git_sha": sha, "resulting_digest": new_image},
+    ]
     assert harness.reload.count == 2
     assert harness.events.events[-1]["active_digest"] == new_image
     assert harness.events.events[-1]["tenant_id"] == TENANT
+
+
+def test_rollout_mounts_the_edited_secret(harness, test_engine):
+    automation_id = _built(harness, test_engine)
+    harness.edit(automation_id, secret_name="rotated-secret")
+    sha = row(test_engine, automation_id)["building_sha"]
+
+    harness.webhook(success(automation_id, sha, 2))
+
+    assert harness.capp.calls[-1] == (
+        "rollout", f"capp-{automation_id}", image(automation_id, 2), ("rotated-secret",)
+    )
+
+
+def test_edit_cannot_move_a_deployed_automation_to_another_wallet(harness, test_engine):
+    # Rollout only swaps image + secrets; accepting a wallet change would leave
+    # the deployment running in the old wallet while the row names the new one.
+    automation_id = _built(harness, test_engine)
+    before = row(test_engine, automation_id)
+    revisions_before = revisions(test_engine, automation_id)
+
+    resp = harness.edit(automation_id, expect=400, namespace="other-wallet")
+
+    assert resp.json() == {
+        "errors": [
+            {
+                "field": "namespace",
+                "code": "namespace_immutable",
+                "message": "a deployed automation cannot move to another wallet",
+            }
+        ]
+    }
+    assert row(test_engine, automation_id) == before
+    assert revisions(test_engine, automation_id) == revisions_before
+
+
+def test_wallet_may_change_until_the_first_deployment(harness, test_engine):
+    created = harness.create()
+    harness.webhook(failed(created["id"], row(test_engine, created["id"])["building_sha"]))
+
+    harness.edit(created["id"], namespace="other-wallet")
+    sha = row(test_engine, created["id"])["building_sha"]
+    harness.webhook(success(created["id"], sha))
+
+    assert harness.capp.calls == [
+        ("create", created["id"], "other-wallet", image(created["id"]), ("payments-secret",))
+    ]
 
 
 def test_edit_of_active_automation_keeps_it_active(harness, test_engine):
@@ -535,14 +661,17 @@ def test_capp_failure_is_503_logged_and_leaves_build_locked(harness, test_engine
 def test_failed_rollout_keeps_old_digest(harness, test_engine):
     automation_id = _built(harness, test_engine)
     harness.edit(automation_id)
-    sha = row(test_engine, automation_id)["building_sha"]
+    before = row(test_engine, automation_id)
     harness.capp.fail = True
     _, reloads, events = harness.counts()
 
-    assert harness.webhook(success(automation_id, sha, 2)).status_code == 503
+    assert harness.webhook(success(automation_id, before["building_sha"], 2)).status_code == 503
     automation = row(test_engine, automation_id)
+    for column in ("active_digest", "build_state", "building_sha", "build_lock_deadline",
+                   "contract_version"):
+        assert automation[column] == before[column]
     assert automation["active_digest"] == image(automation_id)
-    assert automation["build_state"] == "building"
+    assert harness.capp.images[f"capp-{automation_id}"] == image(automation_id)
     assert harness.reload.count == reloads
     assert len(harness.events.events) == events
 
@@ -652,6 +781,30 @@ def test_no_db_connection_is_held_across_the_capp_call(harness, test_engine):
     capp = _ProbingCapp(test_engine)
     builds.apply_build_result(_event(created["id"], sha), capp, RecordingReload(), RecordingEvents())
     assert capp.checked_out == [0]
+
+
+@pytest.mark.parametrize("outcome", ["success", "failed"])
+def test_commit_rechecks_admission_under_a_row_lock(harness, test_engine, outcome):
+    # The race tests run sequentially, so they pass without the lock; pin the
+    # FOR UPDATE itself — it is what stops two deliveries both cutting over.
+    created = harness.create()
+    sha = row(test_engine, created["id"])["building_sha"]
+    payload = success(created["id"], sha) if outcome == "success" else failed(created["id"], sha)
+    statements: list[str] = []
+
+    def record(conn, cursor, statement, *args):
+        statements.append(statement)
+
+    event.listen(test_engine, "before_cursor_execute", record)
+    try:
+        builds.apply_build_result(
+            CiWebhookIn(**payload), InMemoryCappClient(), RecordingReload(), RecordingEvents()
+        )
+    finally:
+        event.remove(test_engine, "before_cursor_execute", record)
+
+    locked = [s for s in statements if "FROM automations" in s and "FOR UPDATE" in s]
+    assert len(locked) == 1
 
 
 def test_concurrent_duplicate_delivery_cuts_over_once(harness, test_engine, caplog):
