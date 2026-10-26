@@ -2,13 +2,13 @@
 
 Network-restricted; verifies a GitLab secret token (placeholder for now).
 """
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, status
 
 from src.api.deps import verify_ci_webhook_token
 
 router = APIRouter()
 
 
-@router.post("/internal/ci-webhook", status_code=200)
+@router.post("/internal/ci-webhook", status_code=status.HTTP_200_OK)
 async def ci_webhook(_token: str | None = Depends(verify_ci_webhook_token)):
     return {"status": "accepted"}

@@ -20,12 +20,23 @@ BL runs in a threadpool, so a client is built fresh per call (see
 I/O — the project handle is lazy — so per-call creation is cheap.
 """
 import hashlib
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from typing import Protocol, runtime_checkable
+from uuid import UUID
 
 from src import config
 from src.exceptions import ScriptRepoUnavailableError
+
+# Delete = archive-mark, never erase (spec §5.4). One deterministic marker file
+# per automation path; F23's CI must ignore commits that only touch it (C3), or
+# deleting an automation would start a fresh image build.
+ARCHIVE_MARKER = ".archived"
+
+
+def archive_marker_path(automation_id: UUID | str) -> str:
+    return f"{automation_id}/{ARCHIVE_MARKER}"
 
 
 @runtime_checkable
@@ -38,6 +49,14 @@ class GitClient(Protocol):
         """Committed bytes at path, or None if absent."""
         ...
 
+    def archive(self, automation_id: UUID, actor: str) -> str:
+        """Archive-mark the automation's path (D18 cascade step 4; real one: D14).
+
+        Idempotent: if the marker already exists, make no commit and return the
+        SHA that created it. Script bytes and history stay in place.
+        """
+        ...
+
 
 class InMemoryGitClient:
     """Deterministic stand-in: sha1 over path + revision counter + content."""
@@ -45,18 +64,35 @@ class InMemoryGitClient:
     def __init__(self):
         self._files: dict[str, str] = {}
         self._revisions: dict[str, int] = {}
+        self._shas: dict[str, str] = {}
+        # Re-entrant: `archive` holds it across its check-and-commit.
+        self._lock = threading.RLock()
+        # Every commit made, in order — lets tests assert "no duplicate archive".
+        self.commit_log: list[str] = []
 
     def commit_script(self, script_path: str, content: str, message: str) -> str:
-        revision = self._revisions.get(script_path, 0) + 1
-        self._revisions[script_path] = revision
-        self._files[script_path] = content
-        digest = hashlib.sha1(
-            f"{script_path}@{revision}\n{content}".encode("utf-8")
-        ).hexdigest()
-        return digest
+        with self._lock:
+            revision = self._revisions.get(script_path, 0) + 1
+            self._revisions[script_path] = revision
+            self._files[script_path] = content
+            digest = hashlib.sha1(
+                f"{script_path}@{revision}\n{content}".encode("utf-8")
+            ).hexdigest()
+            self._shas[script_path] = digest
+            self.commit_log.append(message)
+            return digest
 
     def read_script(self, script_path: str) -> str | None:
         return self._files.get(script_path)
+
+    def archive(self, automation_id: UUID, actor: str) -> str:
+        path = archive_marker_path(automation_id)
+        with self._lock:
+            if path in self._files:
+                return self._shas[path]
+            return self.commit_script(
+                path, f"archived by {actor}\n", f"archive {automation_id}"
+            )
 
 
 class GitlabGitClient:
@@ -76,6 +112,10 @@ class GitlabGitClient:
         # `project` is injected by tests with a fake; production leaves it None
         # and resolves it lazily against GitLab.
         self._project = project
+
+    def archive(self, automation_id: UUID, actor: str) -> str:
+        """D14 must provide durable archival before cascade step 4 can complete."""
+        raise ScriptRepoUnavailableError("GitLab archival is not implemented (D14)")
 
     def _get_project(self):
         if self._project is None:

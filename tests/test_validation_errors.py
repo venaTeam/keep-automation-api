@@ -25,7 +25,11 @@ def test_error_response_matches_golden_fixture():
 
 def test_all_fixture_codes_are_enum_members():
     codes = {c.value for c in ErrorCode}
-    for name in ("field_error.json", "error_shape_example.json"):
+    for name in (
+        "field_error.json",
+        "error_shape_example.json",
+        "active_digest_required_error.json",
+    ):
         payload = json.loads((FIXTURES / name).read_text())
         errors = payload.get("errors", [payload])
         for error in errors:
@@ -34,6 +38,12 @@ def test_all_fixture_codes_are_enum_members():
 
 def test_namespace_invalid_reserved_for_f25():
     assert ErrorCode.NAMESPACE_INVALID.value == "namespace_invalid"
+
+
+def test_active_digest_required_added_by_d18():
+    assert ErrorCode.ACTIVE_DIGEST_REQUIRED.value == "active_digest_required"
+    golden = json.loads((FIXTURES / "active_digest_required_error.json").read_text())
+    assert ValidationErrorResponse(**golden).dict() == golden
 
 
 def test_codes_serialize_as_plain_strings():

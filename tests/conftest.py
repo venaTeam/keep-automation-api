@@ -45,7 +45,13 @@ from sqlmodel import SQLModel
 
 import src.core.db as db_core
 import src.models.db  # noqa: F401  registers the automation tables on the metadata
-from src.api.deps import get_authenticated_entity, get_git_client
+from src.api.deps import (
+    get_authenticated_entity,
+    get_git_client,
+    get_reload_publisher,
+    require_lifecycle_auth,
+)
+
 from src.bl.git_client import InMemoryGitClient
 from src.models.api.identity import AuthenticatedEntity
 from src.main import get_app
@@ -149,21 +155,69 @@ def clean_tables(test_engine):
     yield
 
 
+class RecordingReloadPublisher:
+    """Test double for the Redis `reload` publisher.
+
+    Snapshots the automation rows through the engine (a separate connection)
+    at publish time, so a test can prove the publish happened *after* commit:
+    an uncommitted transition would be invisible in the snapshot.
+    """
+
+    def __init__(self, engine):
+        self._engine = engine
+        self.snapshots: list[dict] = []
+
+    @property
+    def count(self) -> int:
+        return len(self.snapshots)
+
+    def publish_reload(self) -> None:
+        with self._engine.connect() as conn:
+            rows = conn.execute(
+                text("SELECT id, matching_state, index_generation FROM automations")
+            ).all()
+        self.snapshots.append(
+            {str(r.id): (r.matching_state, r.index_generation) for r in rows}
+        )
+
+
 @pytest.fixture()
-def client(test_engine):
+def reload_publisher(test_engine):
+    return RecordingReloadPublisher(test_engine)
+
+
+@pytest.fixture()
+def app_overrides(reload_publisher):
+    """Dependency overrides applied to every app the client fixtures build.
+
+    Tests never reach a real Redis even when REDIS_URL is set in the shell;
+    later fixtures add the cascade adapters to this same dict.
+    """
+    return {
+        get_reload_publisher: lambda: reload_publisher,
+        # Lifecycle route tests exercise the state machine with an explicit
+        # identity override; production noauth access is blocked by default.
+        require_lifecycle_auth: lambda: None,
+    }
+
+
+@pytest.fixture()
+def client(test_engine, app_overrides):
     app = get_app()
+    app.dependency_overrides.update(app_overrides)
+
     # Production get_git_client fails fast without GitLab config; HTTP tests run
     # against an in-memory stub injected through the same seam the real identity
     # manager-era wiring will use. One stub per app so POST-then-GET read-back
     # within a test sees the committed bytes.
     stub = InMemoryGitClient()
-    app.dependency_overrides[get_git_client] = lambda: stub
+    app.dependency_overrides.setdefault(get_git_client, lambda: stub)
     with TestClient(app) as test_client:
         yield test_client
 
 
 @pytest.fixture()
-def client_as(test_engine):
+def client_as(test_engine, app_overrides):
     """Factory for a client authenticated as an arbitrary tenant.
 
     The noauth shim hardcodes one tenant, so cross-tenant HTTP behaviour is only
@@ -174,6 +228,7 @@ def client_as(test_engine):
 
         def _make(tenant_id: str) -> TestClient:
             app = get_app()
+            app.dependency_overrides.update(app_overrides)
             # Returns the same type the real dependency does, so an override
             # cannot drift into a shape the routes no longer accept.
             app.dependency_overrides[get_authenticated_entity] = (
@@ -184,7 +239,7 @@ def client_as(test_engine):
             # Stub the script repo (see `client`): the real client fails fast
             # without GitLab config and these tests never touch a real repo.
             stub = InMemoryGitClient()
-            app.dependency_overrides[get_git_client] = lambda: stub
+            app.dependency_overrides.setdefault(get_git_client, lambda: stub)
             return stack.enter_context(TestClient(app))
 
         yield _make

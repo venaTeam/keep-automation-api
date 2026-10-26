@@ -1,5 +1,5 @@
 """User-tier SSE stub (spec §8.1 `GET /events`). Real event stream lands in D19."""
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, status
 from fastapi.responses import StreamingResponse
 
 from src.api.deps import get_authenticated_entity
@@ -7,7 +7,7 @@ from src.api.deps import get_authenticated_entity
 router = APIRouter(dependencies=[Depends(get_authenticated_entity)])
 
 
-@router.get("/events", status_code=200)
+@router.get("/events", status_code=status.HTTP_200_OK)
 async def events():
     async def event_stream():
         # Skeleton: emit a single SSE keep-alive comment, then close.

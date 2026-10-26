@@ -38,6 +38,22 @@ def test_stub_satisfies_protocol():
     assert isinstance(InMemoryGitClient(), GitClient)
 
 
+def test_archive_marks_path_and_keeps_script_bytes():
+    client = InMemoryGitClient()
+    client.commit_script("abc/script.py", "v1", "create")
+    sha = client.archive("abc", "deleter@keep")
+    assert isinstance(sha, str) and len(sha) == 40
+    assert client.read_script("abc/.archived") is not None
+    assert client.read_script("abc/script.py") == "v1"
+
+
+def test_archive_is_idempotent_no_second_commit():
+    client = InMemoryGitClient()
+    first = client.archive("abc", "deleter@keep")
+    second = client.archive("abc", "someone-else@keep")
+    assert first == second
+    assert client.commit_log.count("archive abc") == 1
+
 # --- GitlabGitClient against a fake python-gitlab project ------------------
 
 
@@ -156,6 +172,14 @@ def test_gitlab_read_maps_other_errors_to_unavailable():
 
 def test_gitlab_client_satisfies_protocol():
     assert isinstance(GitlabGitClient(project=FakeProject()), GitClient)
+
+
+def test_gitlab_archive_fails_closed_until_d14_implements_it():
+    project = FakeProject()
+    client = GitlabGitClient(project=project)
+    with pytest.raises(ScriptRepoUnavailableError, match="archival is not implemented"):
+        client.archive("abc", "deleter@keep")
+    assert project.commits.calls == []
 
 
 def test_gitlab_call_is_time_bounded_and_returns_promptly(monkeypatch):
