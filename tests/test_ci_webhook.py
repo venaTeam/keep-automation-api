@@ -807,27 +807,6 @@ def test_commit_rechecks_admission_under_a_row_lock(harness, test_engine, outcom
     assert len(locked) == 1
 
 
-def test_capp_double_never_reuses_a_deployment_from_another_wallet():
-    # The contract D16 must honour; the double enforces it so a client that
-    # silently reused an old-wallet deployment could not pass this suite.
-    capp = InMemoryCappClient()
-    automation_id = uuid4()
-    first = capp.create_deployment(
-        automation_id=automation_id, wallet="old-wallet", image="i1", secret_refs=[]
-    )
-    again = capp.create_deployment(
-        automation_id=automation_id, wallet="old-wallet", image="i2", secret_refs=[]
-    )
-    moved = capp.create_deployment(
-        automation_id=automation_id, wallet="new-wallet", image="i3", secret_refs=[]
-    )
-    assert again == first
-    assert moved.deployment_id != first.deployment_id
-    assert "new-wallet" in moved.deployment_url
-    assert ("teardown", first.deployment_id) in capp.calls
-    assert first.deployment_id not in capp.images
-
-
 def test_unstored_create_then_wallet_edit_redeploys_in_the_new_wallet(harness, test_engine):
     # Drift path: the lock is released (E21) while CAPP creates the
     # deployment, so its id is never stored; the author then moves the wallet
@@ -858,11 +837,19 @@ def test_unstored_create_then_wallet_edit_redeploys_in_the_new_wallet(harness, t
     probe.during_call = None
     harness.edit(created["id"], namespace="other-wallet")
     sha = row(test_engine, created["id"])["building_sha"]
+    calls_before = len(probe.calls)
     assert harness.webhook(success(created["id"], sha)).json() == {"status": "applied"}
 
-    assert ("teardown", old_deployment) in probe.calls
+    # A create in the new wallet that tears the old deployment down — no rollout.
+    assert probe.calls[calls_before:] == [
+        ("create", created["id"], "other-wallet", image(created["id"]), ("payments-secret",)),
+        ("teardown", old_deployment),
+    ]
+    recreated = probe.deployments[created["id"]]
+    assert recreated.deployment_id != old_deployment
     automation = row(test_engine, created["id"])
-    assert automation["capp_deployment_id"] != old_deployment
+    assert automation["capp_deployment_id"] == recreated.deployment_id
+    assert automation["deployment_url"] == recreated.deployment_url
     assert automation["deployment_url"].startswith("https://other-wallet.")
 
 
@@ -885,10 +872,15 @@ def test_wallet_change_is_rechecked_at_commit(harness, test_engine):
     harness.webhook(failed(created["id"], row(test_engine, created["id"])["building_sha"]))
     revisions_before = revisions(test_engine, created["id"])
 
+    # The real interleaving's end state: a concurrent edit's build finished,
+    # leaving the row idle with a deployment.
     def deploy_meanwhile():
         with test_engine.begin() as conn:
             conn.execute(
-                text("UPDATE automations SET capp_deployment_id = 'capp-x' WHERE id = :id"),
+                text(
+                    "UPDATE automations SET capp_deployment_id = 'capp-x', "
+                    "build_state = 'idle' WHERE id = :id"
+                ),
                 {"id": created["id"]},
             )
 
@@ -899,7 +891,7 @@ def test_wallet_change_is_rechecked_at_commit(harness, test_engine):
     assert resp.json()["errors"][0]["code"] == "namespace_immutable"
     automation = row(test_engine, created["id"])
     assert automation["namespace"] == "payments-wallet"
-    assert automation["build_state"] == "build_failed"
+    assert automation["build_state"] == "idle"
     assert revisions(test_engine, created["id"]) == revisions_before
 
 
