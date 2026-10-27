@@ -49,7 +49,7 @@ from src import config
 from src.bl.capp_client import CappClient, CappDeployment
 from src.contracts.validation_errors import ErrorCode, FieldError
 from src.core.automation_events import AutomationEventPublisher
-from src.core.db import get_session
+from src.core.db import get_session, lock_first
 from src.core.reload import ReloadPublisher
 from src.exceptions import (
     AutomationNotFoundError,
@@ -64,13 +64,12 @@ from src.models.api.ci_webhook import (
     IgnoredReason,
     is_valid_repository,
 )
-from src.models.db.automation import Automation, BuildState, MatchingState
+from src.models.db.automation import DELETION_STATES, Automation, BuildState
 from src.models.db.automation_revision import AutomationRevision
 
 logger = logging.getLogger(__name__)
 
 BUILD_EVENT_TYPE = "build"
-_DELETION_STATES = (MatchingState.DELETING, MatchingState.DELETED)
 
 
 @dataclass(frozen=True)
@@ -85,7 +84,7 @@ class _BuildTarget:
 
 def _admission(automation: Automation, commit_sha: str) -> IgnoredReason | None:
     """Why this webhook must be ignored, or None when it may apply."""
-    if automation.matching_state in _DELETION_STATES:
+    if automation.matching_state in DELETION_STATES:
         return IgnoredReason.DELETING
     if automation.build_state != BuildState.BUILDING:
         return IgnoredReason.NOT_BUILDING
@@ -96,9 +95,9 @@ def _admission(automation: Automation, commit_sha: str) -> IgnoredReason | None:
 
 def _load(session, automation_id: UUID, lock: bool = False) -> Automation:
     query = select(Automation).where(Automation.id == automation_id)
-    if lock:
-        query = query.with_for_update()
-    automation = session.scalars(query).first()
+    # The lock is the one edit/toggle/DELETE admission takes; its wait is
+    # bounded (`lock_first`) so a busy row is a retryable 503, never a 500.
+    automation = lock_first(session, query) if lock else session.scalars(query).first()
     if automation is None:
         raise AutomationNotFoundError()
     return automation

@@ -1,6 +1,8 @@
 """CI webhook (D15, spec §8.2, §5.1): token gate, cutover, failure, idempotency."""
 import asyncio
 import logging
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
@@ -865,9 +867,10 @@ class _HookedGit(InMemoryGitClient):
         return super().commit_script(*args, **kwargs)
 
 
-def test_wallet_change_is_rechecked_at_commit(harness, test_engine):
-    # Phase 1 saw no deployment; a build deploying during the git call must
-    # still stop the wallet move before it is written.
+def test_deploy_during_a_wallet_edit_supersedes_it(harness, test_engine):
+    # The wallet is checked once, at the claim (no deployment yet). Anything
+    # that deploys the row before the edit finishes must first take the claim
+    # away, so the edit is superseded and the wallet move is never written.
     created = harness.create()
     harness.webhook(failed(created["id"], row(test_engine, created["id"])["building_sha"]))
     revisions_before = revisions(test_engine, created["id"])
@@ -886,13 +889,47 @@ def test_wallet_change_is_rechecked_at_commit(harness, test_engine):
 
     git = _HookedGit(deploy_meanwhile)
     harness.client.app.dependency_overrides[get_git_client] = lambda: git
-    resp = harness.edit(created["id"], expect=400, namespace="other-wallet")
+    harness.edit(created["id"], expect=409, namespace="other-wallet")
 
-    assert resp.json()["errors"][0]["code"] == "namespace_immutable"
     automation = row(test_engine, created["id"])
     assert automation["namespace"] == "payments-wallet"
     assert automation["build_state"] == "idle"
     assert revisions(test_engine, created["id"]) == revisions_before
+
+
+def test_busy_row_at_commit_is_a_bounded_503_and_redeliverable(
+    harness, test_engine, monkeypatch
+):
+    # The cutover takes the same bounded lock as edit/toggle/DELETE admission:
+    # a row held elsewhere is a retryable 503, never a statement-timeout 500.
+    monkeypatch.setattr(config, "DB_LOCK_TIMEOUT_MS", 200)
+    created = harness.create()
+    sha = row(test_engine, created["id"])["building_sha"]
+    held, release = threading.Event(), threading.Event()
+
+    def holder():
+        with test_engine.connect() as conn, conn.begin():
+            conn.execute(text("SELECT id FROM automations FOR UPDATE"))
+            held.set()
+            release.wait(timeout=15)
+
+    thread = threading.Thread(target=holder)
+    thread.start()
+    try:
+        assert held.wait(timeout=10)
+        started = time.monotonic()
+        resp = harness.webhook(success(created["id"], sha))
+        elapsed = time.monotonic() - started
+    finally:
+        release.set()
+        thread.join(timeout=15)
+
+    assert resp.status_code == 503
+    assert resp.headers["Retry-After"] == "1"
+    assert elapsed < 3
+    assert row(test_engine, created["id"])["build_state"] == "building"
+    # CAPP's create is idempotent by automation_id, so redelivery completes it.
+    assert harness.webhook(success(created["id"], sha)).json() == {"status": "applied"}
 
 
 def test_concurrent_duplicate_delivery_cuts_over_once(harness, test_engine, caplog):

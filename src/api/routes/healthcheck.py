@@ -17,7 +17,7 @@ because the DB driver is blocking (ADR-008).
 """
 import logging
 
-from fastapi import APIRouter
+from fastapi import APIRouter, status
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 
@@ -29,14 +29,14 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-@router.get("/", status_code=200)
+@router.get("/", status_code=status.HTTP_200_OK)
 async def root():
     return {"service": "keep-automation-api", "version": config.KEEP_VERSION}
 
 
 # 200 is the declared (ready) code; the unready branch below returns an explicit
 # 503 JSONResponse, which overrides it.
-@router.get("/healthcheck", status_code=200)
+@router.get("/healthcheck", status_code=status.HTTP_200_OK)
 async def healthcheck():
     """Readiness: is this pod able to serve a request right now?"""
     try:
@@ -49,13 +49,13 @@ async def healthcheck():
             exc,
         )
         return JSONResponse(
-            status_code=503,
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             content={"status": "unavailable", "database": "unreachable"},
         )
     return {"status": "ok", "database": "ok"}
 
 
-@router.get("/livez", status_code=200)
+@router.get("/livez", status_code=status.HTTP_200_OK)
 async def livez():
     """Liveness: is the process itself up? Deliberately no database call."""
     return {"status": "ok"}

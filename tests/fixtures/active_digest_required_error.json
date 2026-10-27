@@ -1,0 +1,9 @@
+{
+  "errors": [
+    {
+      "field": "active_digest",
+      "code": "active_digest_required",
+      "message": "Cannot enable an automation that has never built successfully; wait for the first build to finish."
+    }
+  ]
+}

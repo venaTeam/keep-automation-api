@@ -19,6 +19,7 @@ sqlalchemy = "^2.0.14"
 # keep-api-gateway's Alembic (spec §4.4 — one `keep` database, one lineage).
 psycopg2-binary = "^2.9.9"
 redis = "^5.2.0"
+
 # Script-repo client (D14): talks to keep-automation-scripts over the GitLab
 # REST API — stateless, no local checkout, no git binary in the image.
 python-gitlab = "^5.6.0"

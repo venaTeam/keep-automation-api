@@ -1,4 +1,4 @@
-"""Authoring business logic: validate → persist → git-commit, one transaction.
+"""Authoring business logic: validate → claim → git-commit → persist.
 
 Synchronous by design — routes run these via `run_in_threadpool` (the pinned
 blocking-I/O pattern, see src/bl/ssrf.py).
@@ -11,20 +11,25 @@ server-derived from the authenticated entity; `AutomationIn` deliberately has no
 `tenant_id` field (§4.1), so a client cannot supply one. Note that a primary-key
 `session.get()` cannot express this filter — hence the explicit selects below.
 
-Ordering (create and update): git I/O is NEVER done while a pooled DB
-connection is held — a hung GitLab call would pin the small shared pool. So the
-git commit happens *outside* the session, and the DB rows are written in a
-short transaction that only touches the database:
+**Git I/O never runs inside a DB transaction or under a row lock** (ADR-008,
+D14-ready). A real GitLab commit takes hundreds of ms to seconds; holding the
+automation's row lock across it would stall every other admission on that row
+(toggle, DELETE, build cutover) into the statement timeout, and holding a pooled
+connection across it drains the small pool.
 
-- create: commit to git first, then INSERT the automation + revision rows in
-  one transaction. A git failure writes no rows (clean, retryable). A DB
-  failure after a successful commit leaves an unreferenced blob at that
-  globally-unique `{uuid}/script.py` path — harmless, never reused, and a retry
-  mints a fresh uuid.
-- update: authorize + read `script_path` in a first short transaction (released
-  before any network call), commit to git, then apply the field changes +
-  revision row in a second short transaction, re-checking the build lock. A git
-  failure leaves the row untouched (retryable).
+- **Create** commits the script first, then inserts the row + revision in one
+  short transaction. Nothing can reference the row before it exists, so no claim
+  is needed. A git failure leaves no DB state. A DB failure after the commit
+  leaves an unreferenced `{id}/script.py` in git (logged; no row points at it).
+- **Edit** uses `build_state=building` itself as the lock: (1) a short row-locked
+  transaction checks lifecycle/build state and claims `building` with a fresh
+  `build_lock_deadline`; (2) the git commit runs with no session open; (3) a
+  short row-locked transaction verifies the claim is still ours and writes the
+  definition, `building_sha` and the revision. A git failure releases the claim
+  (compare-and-set on the deadline, so it never clobbers a newer claim). While
+  claimed, DELETE sees `building` → 409 at once, never a lock wait. A crash
+  between (1) and (3) leaves `building` with a deadline — E21's stuck-build
+  branch releases it (spec §6.2).
 
 Build lock: create/edit set `build_state=building` and arm the lock (spec
 §5.1, §4.4) — `building_sha` is the commit CI will build, `build_lock_deadline`
@@ -33,25 +38,36 @@ CI webhook (`src/bl/builds.py`) admits only the build whose SHA matches
 `building_sha` and clears all three on completion; until it arrives PUT returns
 the mid-build 409.
 """
+import logging
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 
 from src import config
 from src.bl.git_client import GitClient
 from src.bl.validation import validate_automation
-from src.core.db import get_session
+from src.core.db import get_session, lock_first
 from src.exceptions import (
     AutomationBuildingError,
+    AutomationEditSupersededError,
+    AutomationLifecycleConflictError,
     AutomationNotFoundError,
     AutomationValidationError,
 )
 from src.contracts.limits import TIMEOUT_SECONDS_DEFAULT, GRACE_SECONDS_DEFAULT
 from src.contracts.validation_errors import ErrorCode, FieldError
 from src.models.api.automation import AutomationIn
-from src.models.db.automation import Automation, BuildState, MatchingState
+from src.models.db.automation import (
+    DELETION_STATES,
+    Automation,
+    BuildState,
+    MatchingState,
+)
 from src.models.db.automation_revision import AutomationRevision, RevisionAction
+
+logger = logging.getLogger(__name__)
 
 # Bounded list query — ~500 automations expected; pagination is a follow-up.
 LIST_LIMIT = 1000
@@ -92,18 +108,28 @@ def _check_wallet_unchanged(automation: Automation, data: AutomationIn) -> None:
     )
 
 
-def _scoped_get(session, tenant_id: str, automation_id: UUID) -> Automation:
+def scoped_get(
+    session, tenant_id: str, automation_id: UUID, for_update: bool = False
+) -> Automation:
     """Fetch one automation *within* a tenant, or raise not-found.
 
     Never `session.get(Automation, automation_id)`: a bare primary-key lookup
     cannot carry the tenant predicate, so it would return another tenant's row.
+
+    `for_update=True` takes the row lock that serializes admission between
+    edit/build, enable/disable and delete (D18): whichever transaction locks
+    first decides, the other re-reads the committed state. The wait is bounded
+    (`lock_first`): a row held too long is a 503, never a statement-timeout 500.
+    Callers hold it only for a short DB-only transaction — never across I/O.
     """
-    automation = session.scalars(
-        select(Automation).where(
-            Automation.id == automation_id,
-            Automation.tenant_id == tenant_id,
-        )
-    ).first()
+    query = select(Automation).where(
+        Automation.id == automation_id,
+        Automation.tenant_id == tenant_id,
+    )
+    if for_update:
+        automation = lock_first(session, query)
+    else:
+        automation = session.scalars(query).first()
     if automation is None:
         raise AutomationNotFoundError()
     return automation
@@ -115,7 +141,8 @@ def create_automation(
     _validated(data)
     automation_id = uuid4()
     script_path = f"{automation_id}/script.py"
-    # Commit to git first, holding no DB connection across the network call.
+    # Git first, with no session open: the row does not exist yet, so nothing
+    # can race it and no lock or pooled connection is held across git I/O.
     git_sha = git.commit_script(
         script_path, data.script, f"create {data.name} ({automation_id})"
     )
@@ -139,20 +166,114 @@ def create_automation(
         created_by=actor,
         updated_by=actor,
     )
-    with get_session() as session:
-        session.add(automation)
-        session.add(
-            AutomationRevision(
-                automation_id=automation_id,
-                action=RevisionAction.CREATE,
-                git_sha=git_sha,
-                actor=actor,
+    try:
+        with get_session() as session:
+            session.add(automation)
+            session.flush()
+            session.add(
+                AutomationRevision(
+                    automation_id=automation_id,
+                    action=RevisionAction.CREATE,
+                    git_sha=git_sha,
+                    actor=actor,
+                )
             )
+            session.commit()
+            session.refresh(automation)
+            session.expunge(automation)
+    except Exception as exc:
+        logger.warning(
+            "automations: create of %s failed after git commit %s (%s); the "
+            "script path is unreferenced",
+            automation_id,
+            git_sha,
+            type(exc).__name__,
         )
-        session.commit()
-        session.refresh(automation)
-        session.expunge(automation)
+        raise
     return automation
+
+
+@dataclass(frozen=True)
+class _BuildClaim:
+    """What an edit needs to finish or release its `building` claim.
+
+    `deadline` doubles as the claim's fencing token: finish/release act only
+    while the row still carries exactly this deadline, so a claim released by
+    E21 and re-taken by a newer edit is never overwritten by this one.
+    """
+
+    automation_id: UUID
+    script_path: str
+    deadline: datetime
+    previous_build_state: BuildState
+    previous_building_sha: str | None
+
+
+def _claim_build(
+    tenant_id: str, automation_id: UUID, data: AutomationIn
+) -> _BuildClaim:
+    """Transaction 1: admission under the row lock, DB work only."""
+    deadline = _build_lock_deadline()
+    with get_session() as session:
+        automation = scoped_get(session, tenant_id, automation_id, for_update=True)
+        # Lifecycle before build: a deleting/deleted row is never editable, and
+        # an edit would re-arm a build that recreates CAPP resources the
+        # cascade is tearing down (D18).
+        if automation.matching_state in DELETION_STATES:
+            raise AutomationLifecycleConflictError(automation.matching_state.value)
+        if automation.build_state == BuildState.BUILDING:
+            raise AutomationBuildingError()
+        # Checked once, here: the claim fences the row until the finish, so no
+        # build can deploy it in between (`building_sha` stays NULL, so no
+        # webhook matches; anything else loses the claim → superseded).
+        _check_wallet_unchanged(automation, data)
+        claim = _BuildClaim(
+            automation_id=automation.id,
+            script_path=automation.script_path,
+            deadline=deadline,
+            previous_build_state=automation.build_state,
+            previous_building_sha=automation.building_sha,
+        )
+        automation.build_state = BuildState.BUILDING
+        automation.build_lock_deadline = deadline
+        # No SHA until the commit exists: a late webhook for the previous build
+        # must not match this claim.
+        automation.building_sha = None
+        session.add(automation)
+        session.commit()
+    return claim
+
+
+def _release_build_claim(claim: _BuildClaim) -> None:
+    """Undo a claim whose git commit failed. Best effort; never raises.
+
+    If this fails too, the row stays `building` until its deadline and E21's
+    stuck-build branch releases it — the original git error is what surfaces.
+    """
+    try:
+        with get_session() as session:
+            session.execute(
+                update(Automation)
+                .where(
+                    Automation.id == claim.automation_id,
+                    Automation.build_state == BuildState.BUILDING,
+                    Automation.build_lock_deadline == claim.deadline,
+                )
+                .values(
+                    build_state=claim.previous_build_state,
+                    building_sha=claim.previous_building_sha,
+                    build_lock_deadline=None,
+                )
+                .execution_options(synchronize_session=False)
+            )
+            session.commit()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "automations: could not release build claim on %s (%s); it expires "
+            "at its build-lock deadline",
+            claim.automation_id,
+            type(exc).__name__,
+        )
 
 
 def update_automation(
@@ -162,36 +283,35 @@ def update_automation(
     actor: str,
     git: GitClient,
 ) -> Automation:
-    # Validate BEFORE opening the session: ssrf.validate_logstash_url can block
-    # up to 3s on DNS, and holding one of the few pooled connections across it
-    # exhausts the pool under concurrent PUTs (rules/automation-api.md pins
-    # `create`'s shape as the reference). The build-state 409 stays inside the
-    # session; a wasted validation on that path costs nothing.
+    # Validate BEFORE any session: ssrf.validate_logstash_url can block up to 3s
+    # on DNS, and holding one of the few pooled connections across it exhausts
+    # the pool under concurrent PUTs. A wasted validation on a 409 costs nothing.
     _validated(data)
-    # Phase 1 — authorize and read what git needs, then release the connection
-    # before any network call. The 404 (unknown / cross-tenant id) and the
-    # mid-build 409 are decided here, holding no connection across GitLab.
-    with get_session() as session:
-        automation = _scoped_get(session, tenant_id, automation_id)
-        if automation.build_state == BuildState.BUILDING:
-            raise AutomationBuildingError()
-        _check_wallet_unchanged(automation, data)
-        script_path = automation.script_path
+    claim = _claim_build(tenant_id, automation_id, data)
 
-    # Phase 2 — commit to git with no DB connection held. A failure here leaves
-    # the row untouched (retryable); nothing has changed yet.
-    git_sha = git.commit_script(
-        script_path, data.script, f"edit {data.name} ({automation_id})"
-    )
+    # No row lock and no pooled connection held across git I/O.
+    try:
+        git_sha = git.commit_script(
+            claim.script_path, data.script, f"edit {data.name} ({automation_id})"
+        )
+    except Exception:
+        _release_build_claim(claim)
+        raise
 
-    # Phase 3 — apply the change in a second short transaction, re-fetching and
-    # re-checking the build lock (a concurrent edit may have armed it meanwhile).
+    # Transaction 2: finish only if the claim is still ours.
     with get_session() as session:
-        automation = _scoped_get(session, tenant_id, automation_id)
-        if automation.build_state == BuildState.BUILDING:
-            raise AutomationBuildingError()
-        # A concurrent edit's build may have deployed it meanwhile.
-        _check_wallet_unchanged(automation, data)
+        automation = scoped_get(session, tenant_id, automation_id, for_update=True)
+        if (
+            automation.build_state != BuildState.BUILDING
+            or automation.build_lock_deadline != claim.deadline
+        ):
+            logger.warning(
+                "automations: edit of %s superseded after git commit %s; the "
+                "definition was not updated",
+                automation_id,
+                git_sha,
+            )
+            raise AutomationEditSupersededError()
 
         automation.name = data.name
         automation.namespace = data.namespace
@@ -202,11 +322,9 @@ def update_automation(
         automation.timeout_seconds = data.timeout_seconds or TIMEOUT_SECONDS_DEFAULT
         automation.grace_seconds = data.grace_seconds or GRACE_SECONDS_DEFAULT
         automation.logstash_url = data.logstash_url
-        automation.build_state = BuildState.BUILDING
         automation.building_sha = git_sha
-        automation.build_lock_deadline = _build_lock_deadline()
         automation.updated_by = actor
-
+        automation.updated_at = func.now()
         session.add(automation)
         session.add(
             AutomationRevision(
@@ -226,7 +344,7 @@ def get_automation(
     tenant_id: str, automation_id: UUID, git: GitClient
 ) -> tuple[Automation, str | None]:
     with get_session() as session:
-        automation = _scoped_get(session, tenant_id, automation_id)
+        automation = scoped_get(session, tenant_id, automation_id)
         session.expunge(automation)
     script = git.read_script(automation.script_path)
     return automation, script

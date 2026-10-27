@@ -12,7 +12,7 @@ from dotenv import find_dotenv, load_dotenv
 # .env loaded after it would reach os.environ but never the settings.
 load_dotenv(find_dotenv())
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -21,9 +21,13 @@ from src import config
 from src.api.ci_webhook_guard import CiWebhookGuard
 from src.exceptions import (
     AutomationBuildingError,
+    AutomationBusyError,
+    AutomationEditSupersededError,
+    AutomationLifecycleConflictError,
     AutomationNotFoundError,
     AutomationValidationError,
     CappUnavailableError,
+    LifecycleAuthenticationNotConfiguredError,
     ScriptRepoUnavailableError,
 )
 
@@ -119,7 +123,9 @@ def get_app() -> FastAPI:
                     "message": pydantic_error["msg"],
                 }
             )
-        return JSONResponse(status_code=400, content={"errors": errors})
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST, content={"errors": errors}
+        )
 
     # Domain exceptions are mapped once, here, rather than in per-route
     # try/except blocks: the routes stay thin (rules/automation-api.md), a new
@@ -132,7 +138,7 @@ def get_app() -> FastAPI:
         # Same accumulating shape as RequestValidationError above — the UI keys
         # off `code`, so both paths must be indistinguishable to it.
         return JSONResponse(
-            status_code=400,
+            status_code=status.HTTP_400_BAD_REQUEST,
             content={"errors": [e.dict() for e in exc.errors]},
         )
 
@@ -142,16 +148,75 @@ def get_app() -> FastAPI:
     ) -> JSONResponse:
         # Also the cross-tenant answer: an id owned by another tenant is a 404,
         # never a 403, so existence never leaks (spec §8.1).
-        return JSONResponse(status_code=404, content={"detail": "Automation not found"})
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content={"detail": "Automation not found"},
+        )
 
     @app.exception_handler(AutomationBuildingError)
     async def automation_building_handler(
         request: Request, exc: AutomationBuildingError
     ) -> JSONResponse:
         return JSONResponse(
-            status_code=409,
+            status_code=status.HTTP_409_CONFLICT,
             content={
                 "detail": "Automation is mid-build; retry after the build completes"
+            },
+        )
+
+    @app.exception_handler(AutomationLifecycleConflictError)
+    async def automation_lifecycle_conflict_handler(
+        request: Request, exc: AutomationLifecycleConflictError
+    ) -> JSONResponse:
+        # Raised only after the tenant-scoped lookup succeeded, so the 409 never
+        # confirms another tenant's row exists.
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content={
+                "detail": (
+                    "Automation is being deleted or was deleted; "
+                    "this transition is no longer allowed"
+                ),
+                "matching_state": exc.matching_state,
+            },
+        )
+
+    @app.exception_handler(AutomationBusyError)
+    async def automation_busy_handler(
+        request: Request, exc: AutomationBusyError
+    ) -> JSONResponse:
+        # Transient row contention, not a conflict: a retry succeeds (§8.4).
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            headers={"Retry-After": "1"},
+            content={"detail": "Automation is busy; retry shortly"},
+        )
+
+    @app.exception_handler(LifecycleAuthenticationNotConfiguredError)
+    async def lifecycle_auth_not_configured_handler(
+        request: Request, exc: LifecycleAuthenticationNotConfiguredError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={
+                "detail": (
+                    "Lifecycle operations are unavailable until the identity "
+                    "provider is configured"
+                )
+            },
+        )
+
+    @app.exception_handler(AutomationEditSupersededError)
+    async def automation_edit_superseded_handler(
+        request: Request, exc: AutomationEditSupersededError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content={
+                "detail": (
+                    "The automation changed while this edit was being saved; "
+                    "reload it and retry"
+                )
             },
         )
 
@@ -187,9 +252,11 @@ def get_app() -> FastAPI:
 
     # Tier: user-facing (existing identity/session)
     from src.api.routes.user.automations import router as automations_router
+    from src.api.routes.user.lifecycle_routes import router as lifecycle_router
     from src.api.routes.events import router as events_router
 
     app.include_router(automations_router, tags=["user"])
+    app.include_router(lifecycle_router, tags=["user"])
     app.include_router(events_router, tags=["user"])
 
     # Tier: machine (CI webhook — network-restricted)

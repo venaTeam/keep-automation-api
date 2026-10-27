@@ -133,6 +133,13 @@ REDIS_PUBLISH_TIMEOUT_SECONDS = float(
     os.environ.get("REDIS_PUBLISH_TIMEOUT_SECONDS", "1.0")
 )
 
+# How long a row-lock acquisition (SELECT ... FOR UPDATE on an automation) waits
+# before giving up. Must stay well under DB_STATEMENT_TIMEOUT_MS: a lock wait
+# counts against the statement timeout, and hitting that surfaces as a generic
+# 500. Hitting this instead is mapped to a clean `503` + Retry-After — the row is
+# busy for a moment (another edit/toggle/delete admission), a retry succeeds.
+DB_LOCK_TIMEOUT_MS = int(os.environ.get("DATABASE_LOCK_TIMEOUT_MS", "2000"))
+
 # Build lock (spec §4.4 `build_lock_deadline`, §6.2): how long an edit/create
 # may hold `build_state=building` before E21's stuck-build branch may release
 # it. Must exceed the p99 pipeline + CAPP rollout time (spec: 30 min).
@@ -162,3 +169,15 @@ AUTOMATION_IMAGE_REPOSITORY = os.environ.get("AUTOMATION_IMAGE_REPOSITORY", "")
 # read, together with the token, so an unauthenticated or oversized request
 # never gets buffered. A real payload is well under 1 KiB.
 CI_WEBHOOK_MAX_BODY_BYTES = int(os.environ.get("CI_WEBHOOK_MAX_BODY_BYTES", "16384"))
+# Artifactory registry cleanup (A0 supplies these deployment values). The
+# image prefix is the path below the repository containing only automation
+# images; the adapter appends the automation UUID and never walks outside it.
+ARTIFACTORY_URL = os.environ.get("ARTIFACTORY_URL", "")
+ARTIFACTORY_REPOSITORY = os.environ.get("ARTIFACTORY_REPOSITORY", "")
+ARTIFACTORY_IMAGE_PREFIX = os.environ.get("ARTIFACTORY_IMAGE_PREFIX", "")
+ARTIFACTORY_TOKEN = os.environ.get("ARTIFACTORY_TOKEN", "")
+ARTIFACTORY_USERNAME = os.environ.get("ARTIFACTORY_USERNAME", "")
+ARTIFACTORY_PASSWORD = os.environ.get("ARTIFACTORY_PASSWORD", "")
+ARTIFACTORY_TIMEOUT_SECONDS = float(
+    os.environ.get("ARTIFACTORY_TIMEOUT_SECONDS", "10")
+)

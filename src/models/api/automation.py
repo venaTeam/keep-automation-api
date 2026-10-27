@@ -73,3 +73,28 @@ class AutomationOut(AutomationListItem):
     timeout_seconds: int | None
     grace_seconds: int
     logstash_url: str | None
+    # Lifecycle progress (D18): last completed delete-cascade step (null = not
+    # deleting) and the definition-set generation.
+    delete_cascade_step: int | None
+    index_generation: int
+
+
+class LifecycleStatusOut(BaseModel):
+    """Enable / disable / DELETE acknowledgment (D18, spec §8.1).
+
+    Built from the row alone — never reads git, so a lifecycle answer cannot
+    fail on the script repo.
+    """
+
+    id: UUID
+    matching_state: MatchingState
+    build_state: BuildState
+    active_digest: str | None
+    delete_cascade_step: int | None
+    index_generation: int
+    updated_by: str
+    updated_at: datetime
+
+    class Config:
+        orm_mode = True
+        use_enum_values = True

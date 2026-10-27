@@ -11,16 +11,24 @@ import logging
 import threading
 import time
 
-from fastapi import Header, HTTPException, status
+from fastapi import Depends, Header, HTTPException, status
 
 from src import config
 from src.bl.capp_client import CappClient, get_default_capp_client
+from src.bl.cascade import CascadeDeps
+from src.bl.cascade_adapters import (
+    CappDeletionClient,
+    RegistryClient,
+    get_default_capp_deletion_client,
+    get_default_registry_client,
+)
 from src.bl.git_client import GitClient, build_gitlab_client
 from src.core.automation_events import (
     AutomationEventPublisher,
     get_default_event_publisher,
 )
 from src.core.reload import ReloadPublisher, get_default_reload_publisher
+from src.exceptions import LifecycleAuthenticationNotConfiguredError
 from src.models.api.identity import AuthenticatedEntity
 
 logger = logging.getLogger(__name__)
@@ -57,6 +65,27 @@ def get_event_publisher() -> AutomationEventPublisher:
     return get_default_event_publisher()
 
 
+def get_capp_deletion_client() -> CappDeletionClient:
+    """CAPP Capp/Secret deletion. Fails closed until D16's client is wired."""
+    return get_default_capp_deletion_client()
+
+
+def get_registry_client() -> RegistryClient:
+    """D18 registry cleanup, configured with A0's repository and credentials."""
+    return get_default_registry_client()
+
+
+def get_cascade_deps(
+    capp: CappDeletionClient = Depends(get_capp_deletion_client),
+    registry: RegistryClient = Depends(get_registry_client),
+    git: GitClient = Depends(get_git_client),
+    publisher: ReloadPublisher = Depends(get_reload_publisher),
+) -> CascadeDeps:
+    """The delete cascade's adapters, bundled. Each stays individually
+    overridable (tests, and D14/D16/A0 swapping in real clients)."""
+    return CascadeDeps(capp=capp, registry=registry, git=git, publisher=publisher)
+
+
 async def get_authenticated_entity() -> AuthenticatedEntity:
     """User-tier identity. Noauth shim returns a static entity for now.
 
@@ -67,6 +96,20 @@ async def get_authenticated_entity() -> AuthenticatedEntity:
     every tenant-scoped query downstream are typed against.
     """
     return AuthenticatedEntity(tenant_id="keep", email="noauth@keep")
+
+
+def require_lifecycle_auth(
+    entity: AuthenticatedEntity = Depends(get_authenticated_entity),
+) -> None:
+    """Fail closed for lifecycle mutations until real identity is configured.
+
+    CRUD keeps the D12 noauth shim for local development, but enable/disable and
+    DELETE mutate shared state and DELETE is irreversible. They must not use the
+    hard-coded tenant identity when the service is reachable in an environment
+    without the real identity provider.
+    """
+    if config.AUTH_TYPE == "noauth" or entity.email == "noauth@keep":
+        raise LifecycleAuthenticationNotConfiguredError()
 
 
 class _LogThrottle:
