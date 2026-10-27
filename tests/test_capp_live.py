@@ -4,7 +4,9 @@ The supplied hello image must read /etc/automation/run-auth/api-key and expose
 the wrapper's X-API-Key protected POST /run. This is F25-style orchestration,
 deliberately outside the management client and the D17 submit retry loop.
 """
+
 import json
+from http import HTTPStatus
 import os
 import secrets
 import time
@@ -24,7 +26,9 @@ def clean_tables():
     yield
 
 
-@pytest.mark.skipif(os.environ.get("CAPP_LIVE_TEST") != "1", reason="Dev CAPP acceptance is opt-in")
+@pytest.mark.skipif(
+    os.environ.get("CAPP_LIVE_TEST") != "1", reason="Dev CAPP acceptance is opt-in"
+)
 def test_dev_hello_round_trip():
     adapter = CappClient(**load_capp_client_settings())
     wallet = os.environ["CAPP_HELLO_WALLET"]
@@ -33,13 +37,31 @@ def test_dev_hello_round_trip():
     name = f"automation-{uuid4()}"
     secret_name = name + "-run-auth"
     key = secrets.token_urlsafe(32)
-    request = CappRequest(name, image, {
-        "state": "enabled", "size": "small",
-        "scaleSpec": {"minReplicas": 1, "metric": "concurrency", "scaleDelaySeconds": 30},
-        "routeSpec": {"hostname": hostname, "tlsEnabled": True, "routeTimeoutSeconds": 30},
-        "secretVolumes": [{"name": "automation-run-auth", "secretName": secret_name,
-                           "mountPath": "/etc/automation/run-auth"}],
-    })
+    request = CappRequest(
+        name,
+        image,
+        {
+            "state": "enabled",
+            "size": "small",
+            "scaleSpec": {
+                "minReplicas": 1,
+                "metric": "concurrency",
+                "scaleDelaySeconds": 30,
+            },
+            "routeSpec": {
+                "hostname": hostname,
+                "tlsEnabled": True,
+                "routeTimeoutSeconds": 30,
+            },
+            "secretVolumes": [
+                {
+                    "name": "automation-run-auth",
+                    "secretName": secret_name,
+                    "mountPath": "/etc/automation/run-auth",
+                }
+            ],
+        },
+    )
     failure = None
     cleanup_failed = False
     try:
@@ -49,7 +71,11 @@ def test_dev_hello_round_trip():
         while True:
             resource = adapter.get_capp(wallet, name)
             ready = [c for c in resource.conditions if c.type == "Ready"]
-            if resource.image == image and ready and all(c.status == "True" for c in ready):
+            if (
+                resource.image == image
+                and ready
+                and all(c.status == "True" for c in ready)
+            ):
                 break
             if time.monotonic() >= deadline:
                 raise RuntimeError("readiness deadline")
@@ -58,14 +84,23 @@ def test_dev_hello_round_trip():
             raise RuntimeError("unexpected route")
         # Service identity stays in CappClient. Invocation uses only this
         # disposable deployment's run key; no retries and no raw output.
-        invocation = Request(resource.deployment_url + "/run", method="POST",
-                             data=b'{"message":"D16 hello verification"}', headers={
-                                 "Content-Type": "application/json", "X-API-Key": key,
-                                 "X-Run-Id": str(uuid4()), "X-History-Id": "d16-hello",
-                                 "X-Attempt": "1",
-                             })
+        invocation = Request(
+            resource.deployment_url + "/run",
+            method="POST",
+            data=b'{"message":"D16 hello verification"}',
+            headers={
+                "Content-Type": "application/json",
+                "X-API-Key": key,
+                "X-Run-Id": str(uuid4()),
+                "X-History-Id": "d16-hello",
+                "X-Attempt": "1",
+            },
+        )
         with build_opener(_NoRedirect()).open(invocation, timeout=30) as response:
-            if response.status != 200 or json.loads(response.read(65536)).get("status") != "ok":
+            if (
+                response.status != HTTPStatus.OK
+                or json.loads(response.read(65536)).get("status") != "ok"
+            ):
                 raise RuntimeError("hello failed")
     except Exception:
         # Neither transport exceptions nor response bodies may reach pytest.

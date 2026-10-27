@@ -90,7 +90,9 @@ A 401 triggers one authentication recovery and one request replay. Timeouts,
 connection failures, and conflicts never trigger automatic mutation replay.
 Redirects are rejected. TLS verification remains enabled.
 
-`CappError` contains `code`, `http_status`, and `retryable`. Codes include
+HTTP methods and response comparisons use Python's standard-library `HTTPMethod`
+and `HTTPStatus`. `CappError` contains a `CappErrorCode` enum, `http_status`, and
+`retryable`. Codes include
 authentication, authorization, not_found, conflict, unavailable, timeout,
 malformed_response, invalid_target, invalid_request, and configuration.
 `CappAuthenticationError` and `CappConflictError` specialize the relevant codes.
@@ -98,6 +100,13 @@ malformed_response, invalid_target, invalid_request, and configuration.
 mutation**. Inspect a resource after ambiguous create/update outcomes.
 Errors exclude upstream messages, request/response bodies and transport
 exception chains. No client logging or tracing contains credentials or data.
+
+Readiness status and source use `ConditionStatus` and `ConditionSource` enums.
+These and `CappErrorCode` are string enums, preserving string comparisons and
+JSON wire values. Response parsing validates nested objects, scalar types, and
+enum values before constructing result models. HTTP failures share the same
+classification for authentication and resource calls, including transient
+backend outages and nonstandard proxy server-error statuses.
 
 ## Verification and remaining acceptance
 

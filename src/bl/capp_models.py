@@ -1,6 +1,21 @@
 """Internal adapter inputs, never author-facing API request models."""
+
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Any
+
+
+class ConditionStatus(StrEnum):
+    TRUE = "True"
+    FALSE = "False"
+    UNKNOWN = "Unknown"
+
+
+class ConditionSource(StrEnum):
+    CAPP = "capp"
+    KNATIVE = "knative"
+    LOGGING = "logging"
+    ROUTE_DOMAIN_MAPPING = "route.domainmapping"
 
 
 @dataclass(frozen=True)
@@ -33,8 +48,8 @@ class SecretUpdateRequest:
 @dataclass(frozen=True)
 class CappCondition:
     type: str
-    status: str
-    source: str | None = None
+    status: ConditionStatus
+    source: ConditionSource | None = None
 
 
 @dataclass(frozen=True)
