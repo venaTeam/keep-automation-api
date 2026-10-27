@@ -1,22 +1,20 @@
-"""Synchronous CAPP adapter. Call off the event loop, after releasing DB sessions.
+"""Async CAPP adapter. Await resource calls after releasing DB sessions.
 
 No readiness polling, database writes, transport retries, or deployment /run
 calls live here. Authentication is the only automatic retry (once after 401).
 """
 
+import asyncio
 import copy
 import json
 import math
 import re
-import threading
 from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 from http import HTTPMethod, HTTPStatus
-from http.client import HTTPException, HTTPResponse
-from typing import Any, Protocol, TypeAlias
-from urllib.error import HTTPError, URLError
+from typing import Any, TypeAlias
 from urllib.parse import urlsplit
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+import httpx
 
 from src.bl.capp_errors import CappError, CappErrorCode, error_for_status
 from src.bl.capp_models import (
@@ -45,12 +43,6 @@ _SUCCESS_STATUS = {
 }
 
 
-class HttpOpener(Protocol):
-    def __call__(self, request: Request, *, timeout: float) -> HTTPResponse:
-        """Open one HTTP request; implementations must honor its timeout."""
-        ...
-
-
 _FIELDS = frozenset(
     (
         "scaleSpec",
@@ -71,11 +63,6 @@ _FIELDS = frozenset(
 _OWNED_SECRET = re.compile(
     r"automation-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-run-auth"
 )
-
-
-class _NoRedirect(HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
 
 
 def _segment(value: str) -> str:
@@ -171,7 +158,7 @@ class CappClient:
         password: str,
         wallets: Mapping[str, str],
         timeout_seconds: float = 30,
-        opener: HttpOpener | None = None,
+        transport: httpx.AsyncBaseTransport | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         try:
@@ -203,9 +190,14 @@ class CappClient:
         self._base_url = base_url.rstrip("/")
         self._username, self._password = username, password
         self._timeout = timeout_seconds
-        self._opener = opener
+        self._http = httpx.AsyncClient(
+            timeout=timeout_seconds,
+            follow_redirects=False,
+            trust_env=False,
+            transport=transport,
+        )
         self._clock = clock or (lambda: datetime.now(timezone.utc))
-        self._auth_lock = threading.Lock()
+        self._auth_lock = asyncio.Lock()
         self._access_token = self._refresh_token = ""
         self._expires_at = datetime.min.replace(tzinfo=timezone.utc)
 
@@ -224,67 +216,64 @@ class CappClient:
         suffix = f"/{_segment(name)}" if name is not None else ""
         return f"/api/v1/clusters/{target.cluster}/namespaces/{target.wallet_name}/{kind}{suffix}"
 
-    def _send(
+    async def __aenter__(self) -> "CappClient":
+        return self
+
+    async def __aexit__(self, exc_type, exc, traceback) -> None:
+        await self.aclose()
+
+    async def aclose(self) -> None:
+        """Release the connection pool when its owning application shuts down."""
+        await self._http.aclose()
+
+    async def _send(
         self,
         method: HTTPMethod,
         path: str,
         body: JsonObject | None = None,
         token: str = "",
     ) -> tuple[int, JsonObject]:
-        # Request-local opener avoids shared cookies/transport state. Never follow
-        # redirects, which could forward the service identity to another origin.
         error = CappError(CappErrorCode.MALFORMED_RESPONSE)
         try:
             headers = {"Content-Type": "application/json", "Accept": "application/json"}
             if token:
                 headers["Authorization"] = f"Bearer {token}"
-            request = Request(
-                self._base_url + path,
-                method=method,
-                headers=headers,
-                data=json.dumps(body).encode() if body is not None else None,
-            )
-            open_request = self._opener or build_opener(_NoRedirect()).open
-            with open_request(request, timeout=self._timeout) as response:
-                status = response.status
-                if (
-                    status >= HTTPStatus.MULTIPLE_CHOICES
-                    or status == HTTPStatus.NO_CONTENT
-                ):
-                    return status, {}
-                raw = response.read(_MAX_RESPONSE_BYTES + 1)
-                if len(raw) > _MAX_RESPONSE_BYTES:
-                    error = CappError(CappErrorCode.MALFORMED_RESPONSE)
-                else:
+            # Bound total elapsed time as well as connect/read/write/pool waits.
+            # A slow trickle must not evade the request deadline.
+            async with asyncio.timeout(self._timeout):
+                async with self._http.stream(
+                    method,
+                    self._base_url + path,
+                    headers=headers,
+                    content=json.dumps(body).encode() if body is not None else None,
+                    timeout=self._timeout,
+                ) as response:
+                    status = response.status_code
+                    if (
+                        status >= HTTPStatus.MULTIPLE_CHOICES
+                        or status == HTTPStatus.NO_CONTENT
+                    ):
+                        return status, {}
+                    raw = bytearray()
+                    async for chunk in response.aiter_bytes():
+                        if len(raw) + len(chunk) > _MAX_RESPONSE_BYTES:
+                            raise CappError(CappErrorCode.MALFORMED_RESPONSE)
+                        raw.extend(chunk)
                     payload = json.loads(raw)
                     if isinstance(payload, dict):
                         return status, payload
-                    error = CappError(CappErrorCode.MALFORMED_RESPONSE)
-        except HTTPError as exc:
-            status = exc.code
-            exc.close()
-            return status, {}
-        except TimeoutError:
+        except (TimeoutError, httpx.TimeoutException):
             error = CappError(CappErrorCode.TIMEOUT, retryable=True)
-        except URLError as exc:
-            error = CappError(
-                (
-                    CappErrorCode.TIMEOUT
-                    if isinstance(exc.reason, TimeoutError)
-                    else CappErrorCode.UNAVAILABLE
-                ),
-                retryable=True,
-            )
-        except (OSError, HTTPException):
+        except (httpx.RequestError, OSError):
             error = CappError(CappErrorCode.UNAVAILABLE, retryable=True)
         except (ValueError, TypeError, UnicodeError):
             error = CappError(CappErrorCode.MALFORMED_RESPONSE)
-        # Raise outside the handler: raw exceptions (potentially containing
-        # passwords, tokens or Secret bodies) are not retained as __context__.
+        # Raise outside handlers so raw transport errors aren't retained as context.
+        # Cancellation is deliberately not caught; async callers own task lifetime.
         raise error
 
-    def _authenticate(self, failed_token: str | None = None) -> str:
-        with self._auth_lock:
+    async def _authenticate(self, failed_token: str | None = None) -> str:
+        async with self._auth_lock:
             usable = (
                 self._access_token
                 and (self._expires_at - self._clock()).total_seconds()
@@ -295,19 +284,21 @@ class CappClient:
             self._access_token = ""
             if self._refresh_token:
                 try:
-                    self._login_request(
+                    await self._login_request(
                         "refresh", {"refreshToken": self._refresh_token}
                     )
                     return self._access_token
                 except CappError:
                     self._refresh_token = ""
-            self._login_request(
+            await self._login_request(
                 "login", {"username": self._username, "password": self._password}
             )
             return self._access_token
 
-    def _login_request(self, operation: str, body: JsonObject) -> None:
-        status, payload = self._send(HTTPMethod.POST, f"/api/v1/auth/{operation}", body)
+    async def _login_request(self, operation: str, body: JsonObject) -> None:
+        status, payload = await self._send(
+            HTTPMethod.POST, f"/api/v1/auth/{operation}", body
+        )
         if status != HTTPStatus.OK:
             raise error_for_status(status)
         access = _required_string(payload, "accessToken")
@@ -329,14 +320,14 @@ class CappClient:
         self._refresh_token = refresh
         self._expires_at = expires
 
-    def _request(
+    async def _request(
         self, method: HTTPMethod, path: str, body: JsonObject | None = None
     ) -> JsonObject:
-        token = self._authenticate()
-        status, payload = self._send(method, path, body, token)
+        token = await self._authenticate()
+        status, payload = await self._send(method, path, body, token)
         if status == HTTPStatus.UNAUTHORIZED:
-            token = self._authenticate(failed_token=token)
-            status, payload = self._send(method, path, body, token)
+            token = await self._authenticate(failed_token=token)
+            status, payload = await self._send(method, path, body, token)
         if method == HTTPMethod.DELETE and status in (
             HTTPStatus.NO_CONTENT,
             HTTPStatus.NOT_FOUND,
@@ -401,26 +392,28 @@ class CappClient:
             resource_version=_optional_string(raw, "resourceVersion"),
         )
 
-    def create_capp(self, target: WalletTarget, spec: CappRequest) -> CappResource:
+    async def create_capp(
+        self, target: WalletTarget, spec: CappRequest
+    ) -> CappResource:
         path = self._path(target, "capps")
-        raw = self._request(HTTPMethod.POST, path, self._capp_body(spec))
+        raw = await self._request(HTTPMethod.POST, path, self._capp_body(spec))
         return self._capp_result(raw, target, spec.name)
 
-    def get_capp(self, target: WalletTarget, name: str) -> CappResource:
+    async def get_capp(self, target: WalletTarget, name: str) -> CappResource:
         return self._capp_result(
-            self._request(HTTPMethod.GET, self._path(target, "capps", name)),
+            await self._request(HTTPMethod.GET, self._path(target, "capps", name)),
             target,
             name,
         )
 
-    def update_capp(
+    async def update_capp(
         self, target: WalletTarget, name: str, spec: CappRequest
     ) -> CappResource:
         path = self._path(target, "capps", name)
         changes = self._capp_body(spec)
         if spec.name != name:
             raise CappError(CappErrorCode.INVALID_REQUEST)
-        current = self._request(HTTPMethod.GET, path)
+        current = await self._request(HTTPMethod.GET, path)
         self._capp_result(current, target, name)
         body = {k: v for k, v in current.items() if k in _FIELDS}
         # Response 'resources' is the resolved value; request uses customResources.
@@ -433,11 +426,11 @@ class CappClient:
             body.pop("size", None)
         # Per caap.yaml the backend preserves metadata/resourceVersion itself.
         return self._capp_result(
-            self._request(HTTPMethod.PUT, path, body), target, name
+            await self._request(HTTPMethod.PUT, path, body), target, name
         )
 
-    def delete_capp(self, wallet: WalletTarget, name: str) -> None:
-        self._request(HTTPMethod.DELETE, self._path(wallet, "capps", name))
+    async def delete_capp(self, wallet: WalletTarget, name: str) -> None:
+        await self._request(HTTPMethod.DELETE, self._path(wallet, "capps", name))
 
     def _secret_path(
         self, target: WalletTarget, name: str, collection: bool = False
@@ -471,7 +464,7 @@ class CappClient:
             resource_version=_optional_string(raw, "resourceVersion"),
         )
 
-    def create_secret(
+    async def create_secret(
         self, target: WalletTarget, spec: SecretRequest
     ) -> SecretResource:
         path = self._secret_path(target, spec.name, collection=True)
@@ -483,23 +476,25 @@ class CappClient:
             "data": self._secret_data(spec.data),
         }
         return self._secret_result(
-            self._request(HTTPMethod.POST, path, body), target, spec.name
+            await self._request(HTTPMethod.POST, path, body), target, spec.name
         )
 
-    def get_secret(self, target: WalletTarget, name: str) -> SecretResource:
+    async def get_secret(self, target: WalletTarget, name: str) -> SecretResource:
         return self._secret_result(
-            self._request(HTTPMethod.GET, self._secret_path(target, name)), target, name
+            await self._request(HTTPMethod.GET, self._secret_path(target, name)),
+            target,
+            name,
         )
 
-    def update_secret(
+    async def update_secret(
         self, target: WalletTarget, name: str, spec: SecretUpdateRequest
     ) -> SecretResource:
         path = self._secret_path(target, name)
         body = {"data": self._secret_data(spec.data)}
-        self.get_secret(target, name)
+        await self.get_secret(target, name)
         return self._secret_result(
-            self._request(HTTPMethod.PUT, path, body), target, name
+            await self._request(HTTPMethod.PUT, path, body), target, name
         )
 
-    def delete_secret(self, wallet: WalletTarget, name: str) -> None:
-        self._request(HTTPMethod.DELETE, self._secret_path(wallet, name))
+    async def delete_secret(self, wallet: WalletTarget, name: str) -> None:
+        await self._request(HTTPMethod.DELETE, self._secret_path(wallet, name))

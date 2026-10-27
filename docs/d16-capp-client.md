@@ -1,8 +1,8 @@
 # D16 CAPP management adapter
 
 `src/bl/capp_client.py` implements Capp and Keep-owned run-auth Secret
-create/get/update/delete against the supplied `caap.yaml` contract. It is
-synchronous: invoke it in a worker thread, after closing the DB transaction.
+create/get/update/delete against the supplied `caap.yaml` contract. It uses
+`httpx.AsyncClient`: await each resource operation after closing the DB transaction.
 It never reads or writes the database, advances `active_digest`, polls readiness,
 or invokes `/run`.
 
@@ -35,7 +35,6 @@ from src.bl.capp_client import CappClient
 from src.bl.capp_models import CappRequest
 from src.config import load_capp_client_settings
 
-client = CappClient(**load_capp_client_settings())
 request = CappRequest(
     name=f"automation-{automation_id}",
     image=verified_build_image,  # registry/path@sha256:<64 hex characters>
@@ -49,12 +48,20 @@ request = CappRequest(
                            "mountPath": "/etc/automation/secrets"}],
     },
 )
-resource = client.create_capp(stored_wallet, request)
+async with CappClient(**load_capp_client_settings()) as client:
+    resource = await client.create_capp(stored_wallet, request)
 # D15 persists resource.uid and resource.deployment_url in its own transaction.
 # Keep resource.name (deterministic automation-UUID) for later GET/PUT/DELETE.
 ```
 
-For cutover call `update_capp(wallet, name, CappRequest(name, new_image))`.
+In API routes, reuse the app-scoped client supplied by `get_capp_deletion_client`.
+It is created lazily on that app's event loop and closed during FastAPI lifespan
+shutdown. Standalone async callers own the client via `async with` or
+`await client.aclose()`. Do not share a client across event loops or instantiate
+one per call in a polling loop. This follows
+[HTTPX's async client lifecycle guidance](https://www.python-httpx.org/async/).
+
+For cutover call `await client.update_capp(wallet, name, CappRequest(name, new_image))`.
 The adapter GETs the current object, preserves its managed configuration,
 recursively overlays explicit dictionaries, replaces explicit arrays, and PUTs
 the complete spec. Omitted fields survive; explicit nulls/empty arrays clear
@@ -77,6 +84,12 @@ new UID-valued IDs, using the deterministic name for the latter. Secret methods
 accept only `automation-<UUID>-run-auth`; team Secret references are never
 fetched or deleted. Missing team Secrets remain CAPP runtime mount failures.
 
+The D18 cascade, background attempt, resume, and wallet deboarding are async.
+They await CAPP operations directly, while short database transactions and the
+existing synchronous Git/registry/reload adapters run in worker threads. No DB
+session crosses a CAPP await. Cancellation propagates and leaves the last durable
+checkpoint for a later retry; it is not converted to success or retried inline.
+
 Secret updates GET first, then replace the entire `data` map; omitted keys are
 removed. Secret results expose identity/version only, never data. Capp results
 expose name, UID, URL, image, conditions and version, without raw response JSON,
@@ -84,11 +97,16 @@ environment values, annotations or freeform condition messages.
 
 ## Authentication and failures
 
-Login is lazy and token refresh is serialized by a per-client lock. Refresh
+Login is lazy and token refresh is serialized by a per-client `asyncio.Lock`. Refresh
 starts within 30 seconds of expiry; a failed refresh falls back to one login.
 A 401 triggers one authentication recovery and one request replay. Timeouts,
 connection failures, and conflicts never trigger automatic mutation replay.
 Redirects are rejected. TLS verification remains enabled.
+Each request has explicit HTTPX connect/read/write/pool timeouts and an outer
+`asyncio.timeout` total deadline. Responses are streamed with a size limit and
+closed on success, failure, timeout, or cancellation. Environment proxy and netrc
+configuration is disabled (`trust_env=False`); the injected service identity is
+the sole authentication source.
 
 HTTP methods and response comparisons use Python's standard-library `HTTPMethod`
 and `HTTPStatus`. `CappError` contains a `CappErrorCode` enum, `http_status`, and
@@ -114,6 +132,10 @@ backend outages and nonstandard proxy server-error statuses.
 Docker. They cover every method/path, timeout propagation, auth refresh and
 concurrency, 401 recovery, safe errors, replacement, conflict, ownership and
 wallet validation, result mapping, and D18 dependency compatibility.
+Async tests also verify overlapping requests, concurrent 401 recovery, cancellation,
+stream cleanup, total deadlines, and per-app pool lifecycle. Run
+`tests/test_cascade_async.py` for worker-thread and checkpoint guarantees without
+Docker; the existing database-backed lifecycle tests exercise the same async runner.
 
 `tests/test_capp_live.py` is an opt-in dev acceptance runner. It creates a unique
 run-auth Secret and hello Capp, polls readiness for up to 600 seconds, invokes

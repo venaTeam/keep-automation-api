@@ -1,17 +1,16 @@
 """D16 wire contracts. No network or DB needed; transport asserts every timeout."""
 
+import asyncio
 import copy
+import httpx
 import json
 from http import HTTPStatus
 import traceback
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
-from io import BytesIO
-from urllib.error import HTTPError, URLError
 
 import pytest
 
-from src.bl.capp_client import CappClient, _NoRedirect
+from src.bl.capp_client import CappClient
 from src.bl.capp_errors import (
     CappAuthenticationError,
     CappConflictError,
@@ -44,10 +43,15 @@ IDENTITY = (
 )
 
 
+_clients = []
+
+
 @pytest.fixture(autouse=True)
-def clean_tables():
+async def clean_tables():
     """Override the suite's DB cleanup: these wire tests never use a database."""
     yield
+    while _clients:
+        await _clients.pop().aclose()
 
 
 def tokens(access=IDENTITY[2], expires=None):
@@ -89,31 +93,28 @@ def secret():
     }
 
 
-class Response(BytesIO):
-    def __init__(self, status, body):
-        super().__init__(body if isinstance(body, bytes) else json.dumps(body).encode())
-        self.status = status
-
-
 class Wire:
     def __init__(self, replies):
         self.replies = list(replies)
         self.calls = []
 
-    def __call__(self, request, *, timeout):
-        assert timeout == 7
+    async def __call__(self, request):
+        assert request.extensions["timeout"] == dict(connect=7, read=7, write=7, pool=7)
         self.calls.append(
             (
                 request.method,
-                request.full_url,
-                json.loads(request.data) if request.data else None,
-                dict(request.header_items()),
+                str(request.url),
+                json.loads(request.content) if request.content else None,
+                dict(request.headers),
             )
         )
         reply = self.replies.pop(0)
         if isinstance(reply, Exception):
             raise reply
-        return Response(*reply)
+        status, body = reply
+        if isinstance(body, bytes):
+            return httpx.Response(status, content=body)
+        return httpx.Response(status, json=body)
 
 
 def client(replies):
@@ -124,13 +125,14 @@ def client(replies):
         password=IDENTITY[1],
         wallets={"team": "dev"},
         timeout_seconds=7,
-        opener=wire,
+        transport=httpx.MockTransport(wire),
         clock=lambda: NOW,
     )
+    _clients.append(adapter)
     return adapter, wire
 
 
-def test_create_maps_identity_url_and_configuration():
+async def test_create_maps_identity_url_and_configuration():
     adapter, wire = client([(HTTPStatus.OK, tokens()), (HTTPStatus.CREATED, capp())])
     config = {
         "scaleSpec": {"minReplicas": 1},
@@ -143,7 +145,7 @@ def test_create_maps_identity_url_and_configuration():
             }
         ],
     }
-    result = adapter.create_capp(
+    result = await adapter.create_capp(
         CappWalletTarget("dev", "team"), CappRequest(NAME, IMAGE, config)
     )
     assert (result.uid, result.name, result.deployment_url) == (
@@ -162,12 +164,12 @@ def test_create_maps_identity_url_and_configuration():
         PATH + "capps",
         {**config, "name": NAME, "image": IMAGE},
     )
-    assert wire.calls[1][3]["Authorization"] == "Bearer " + IDENTITY[2]
+    assert wire.calls[1][3]["authorization"] == "Bearer " + IDENTITY[2]
     assert not wire.replies  # No preflight for the optional team Secret.
 
 
 @pytest.mark.parametrize("ready", ["True", "False", "Unknown"])
-def test_readiness(ready):
+async def test_readiness(ready):
     adapter, wire = client(
         [
             (HTTPStatus.OK, tokens()),
@@ -177,11 +179,11 @@ def test_readiness(ready):
             ),
         ]
     )
-    assert adapter.get_capp("team", NAME).conditions[0].status == ready
+    assert (await adapter.get_capp("team", NAME)).conditions[0].status == ready
     assert wire.calls[1][:2] == ("GET", PATH + "capps/" + NAME)
 
 
-def test_rollout_preserves_full_spec_and_does_not_change_input():
+async def test_rollout_preserves_full_spec_and_does_not_change_input():
     current = capp(
         secretVolumes=[{"secretName": "team-secret"}],
         env=[{"name": "A", "value": "B"}],
@@ -195,7 +197,7 @@ def test_rollout_preserves_full_spec_and_does_not_change_input():
             (HTTPStatus.OK, capp(image=NEXT_IMAGE)),
         ]
     )
-    result = adapter.update_capp(
+    result = await adapter.update_capp(
         "team",
         NAME,
         CappRequest(NAME, NEXT_IMAGE, {"routeSpec": {"routeTimeoutSeconds": 300}}),
@@ -218,7 +220,7 @@ def test_rollout_preserves_full_spec_and_does_not_change_input():
         ({"customResources": {"requests": {"cpu": "2"}}}, "customResources", "size"),
     ],
 )
-def test_custom_resources_survive_replacement(changes, expected, absent):
+async def test_custom_resources_survive_replacement(changes, expected, absent):
     adapter, wire = client(
         [
             (HTTPStatus.OK, tokens()),
@@ -226,7 +228,7 @@ def test_custom_resources_survive_replacement(changes, expected, absent):
             (HTTPStatus.OK, capp()),
         ]
     )
-    adapter.update_capp("team", NAME, CappRequest(NAME, IMAGE, changes))
+    (await adapter.update_capp("team", NAME, CappRequest(NAME, IMAGE, changes)))
     assert wire.calls[-1][2][expected]
     assert not wire.calls[-1][2].get(absent)
 
@@ -240,7 +242,7 @@ def test_custom_resources_survive_replacement(changes, expected, absent):
         (HTTPStatus.SERVICE_UNAVAILABLE, "unavailable"),
     ],
 )
-def test_failed_rollout_is_not_retried_or_committed(status, code):
+async def test_failed_rollout_is_not_retried_or_committed(status, code):
     old = capp()
     adapter, wire = client(
         [
@@ -250,7 +252,7 @@ def test_failed_rollout_is_not_retried_or_committed(status, code):
         ]
     )
     with pytest.raises(CappError) as caught:
-        adapter.update_capp("team", NAME, CappRequest(NAME, NEXT_IMAGE))
+        (await adapter.update_capp("team", NAME, CappRequest(NAME, NEXT_IMAGE)))
     assert caught.value.code == code
     if status == HTTPStatus.CONFLICT:
         assert isinstance(caught.value, CappConflictError)
@@ -258,7 +260,7 @@ def test_failed_rollout_is_not_retried_or_committed(status, code):
     assert [c[0] for c in wire.calls] == ["POST", "GET", "PUT"]
 
 
-def test_secret_crud_replaces_all_data_and_excludes_values_from_results():
+async def test_secret_crud_replaces_all_data_and_excludes_values_from_results():
     adapter, wire = client(
         [
             (HTTPStatus.OK, tokens()),
@@ -270,12 +272,14 @@ def test_secret_crud_replaces_all_data_and_excludes_values_from_results():
         ]
     )
     spec = SecretRequest(SECRET, {"key": "secret-sensitive"})
-    result = adapter.create_secret("team", spec)
-    adapter.get_secret("team", SECRET)
-    adapter.update_secret(
-        "team", SECRET, SecretUpdateRequest({"new": "replacement-sensitive"})
+    result = await adapter.create_secret("team", spec)
+    (await adapter.get_secret("team", SECRET))
+    (
+        await adapter.update_secret(
+            "team", SECRET, SecretUpdateRequest({"new": "replacement-sensitive"})
+        )
     )
-    adapter.delete_secret("team", SECRET)
+    (await adapter.delete_secret("team", SECRET))
     assert wire.calls[1][:3] == (
         "POST",
         PATH + "secrets",
@@ -294,14 +298,14 @@ def test_secret_crud_replaces_all_data_and_excludes_values_from_results():
 
 @pytest.mark.parametrize("status", [HTTPStatus.NO_CONTENT, HTTPStatus.NOT_FOUND])
 @pytest.mark.parametrize("kind,name", [("capp", NAME), ("secret", SECRET)])
-def test_delete_idempotent(status, kind, name):
+async def test_delete_idempotent(status, kind, name):
     adapter, wire = client([(HTTPStatus.OK, tokens()), (status, {})])
     assert isinstance(adapter, CappDeletionClient)
-    assert getattr(adapter, "delete_" + kind)(wallet="team", name=name) is None
+    assert (await getattr(adapter, "delete_" + kind)(wallet="team", name=name)) is None
     assert wire.calls[-1][:2] == ("DELETE", PATH + kind + "s/" + name)
 
 
-def test_401_refresh_retry_once():
+async def test_401_refresh_retry_once():
     adapter, wire = client(
         [
             (HTTPStatus.OK, tokens()),
@@ -310,16 +314,16 @@ def test_401_refresh_retry_once():
             (HTTPStatus.OK, capp()),
         ]
     )
-    adapter.get_capp("team", NAME)
+    (await adapter.get_capp("team", NAME))
     assert wire.calls[2][:3] == (
         "POST",
         ROOT + "/auth/refresh",
         {"refreshToken": IDENTITY[3]},
     )
-    assert wire.calls[3][3]["Authorization"] == "Bearer new-access"
+    assert wire.calls[3][3]["authorization"] == "Bearer new-access"
 
 
-def test_repeated_401_stops():
+async def test_repeated_401_stops():
     adapter, wire = client(
         [
             (HTTPStatus.OK, tokens()),
@@ -329,14 +333,14 @@ def test_repeated_401_stops():
         ]
     )
     with pytest.raises(CappAuthenticationError):
-        adapter.get_capp("team", NAME)
+        (await adapter.get_capp("team", NAME))
     assert len(wire.calls) == 4
 
 
 @pytest.mark.parametrize(
     "refresh_reply", [(HTTPStatus.UNAUTHORIZED, {}), TimeoutError("refresh-sensitive")]
 )
-def test_refresh_failure_falls_back_to_one_login(refresh_reply):
+async def test_refresh_failure_falls_back_to_one_login(refresh_reply):
     adapter, wire = client(
         [
             (HTTPStatus.OK, tokens()),
@@ -346,9 +350,9 @@ def test_refresh_failure_falls_back_to_one_login(refresh_reply):
             (HTTPStatus.OK, capp()),
         ]
     )
-    adapter.get_capp("team", NAME)
+    (await adapter.get_capp("team", NAME))
     adapter._clock = lambda: NOW + timedelta(minutes=59, seconds=45)
-    adapter.get_capp("team", NAME)
+    (await adapter.get_capp("team", NAME))
     assert [c[1].split("/")[-1] for c in wire.calls] == [
         "login",
         NAME,
@@ -358,13 +362,10 @@ def test_refresh_failure_falls_back_to_one_login(refresh_reply):
     ]
 
 
-def test_concurrent_first_login_serialized():
+async def test_concurrent_first_login_serialized():
     adapter, wire = client([(HTTPStatus.OK, tokens())])
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        assert (
-            list(pool.map(lambda _: adapter._authenticate(), range(32)))
-            == [IDENTITY[2]] * 32
-        )
+    results = await asyncio.gather(*(adapter._authenticate() for _ in range(32)))
+    assert results == [IDENTITY[2]] * 32
     assert len(wire.calls) == 1
 
 
@@ -392,12 +393,12 @@ def test_concurrent_first_login_serialized():
         (lambda c: c.delete_secret("team", SECRET), []),
     ],
 )
-def test_every_operation_timeout_without_replay(operation, prefix):
+async def test_every_operation_timeout_without_replay(operation, prefix):
     adapter, wire = client(
         [(HTTPStatus.OK, tokens()), *prefix, TimeoutError("password-sensitive")]
     )
     with pytest.raises(CappError) as caught:
-        operation(adapter)
+        (await operation(adapter))
     assert caught.value.code == "timeout"
     assert len(wire.calls) == len(prefix) + 2
     assert caught.value.__context__ is None
@@ -407,23 +408,17 @@ def test_every_operation_timeout_without_replay(operation, prefix):
     "failure",
     [
         TimeoutError("password-sensitive"),
-        URLError("access-sensitive"),
+        httpx.ConnectError("access-sensitive"),
         (HTTPStatus.FORBIDDEN, {"error": "password-sensitive secret-sensitive"}),
         (HTTPStatus.OK, b"password-sensitive"),
-        HTTPError(
-            "https://password-sensitive",
-            HTTPStatus.FORBIDDEN,
-            "refresh-sensitive",
-            {},
-            BytesIO(b"secret-sensitive"),
-        ),
+        httpx.RemoteProtocolError("refresh-sensitive secret-sensitive"),
     ],
 )
-def test_redaction_across_transport_errors(failure, caplog):
+async def test_redaction_across_transport_errors(failure, caplog):
     adapter, wire = client([(HTTPStatus.OK, tokens()), failure])
     request = SecretRequest(SECRET, {"key": "secret-sensitive"})
     with pytest.raises(CappError) as caught:
-        adapter.create_secret("team", request)
+        (await adapter.create_secret("team", request))
     exposed = (
         caplog.text
         + repr(caught.value)
@@ -434,20 +429,20 @@ def test_redaction_across_transport_errors(failure, caplog):
     assert caught.value.__context__ is None
 
 
-def test_login_timeout_is_sanitized():
+async def test_login_timeout_is_sanitized():
     adapter, wire = client([TimeoutError(IDENTITY[1])])
     with pytest.raises(CappError, match="timeout"):
-        adapter.get_capp("team", NAME)
+        (await adapter.get_capp("team", NAME))
     assert len(wire.calls) == 1
 
 
 @pytest.mark.parametrize("credential", IDENTITY)
-def test_success_body_cannot_reflect_identity_to_callers(credential):
+async def test_success_body_cannot_reflect_identity_to_callers(credential):
     adapter, _ = client(
         [(HTTPStatus.OK, tokens()), (HTTPStatus.OK, capp(uid="echo:" + credential))]
     )
     with pytest.raises(CappError, match="malformed_response") as caught:
-        adapter.get_capp("team", NAME)
+        (await adapter.get_capp("team", NAME))
     assert credential not in str(caught.value)
 
 
@@ -463,10 +458,10 @@ def test_success_body_cannot_reflect_identity_to_callers(credential):
         CappWalletTarget("other", "team"),
     ],
 )
-def test_untrusted_targets_fail_before_authentication(target):
+async def test_untrusted_targets_fail_before_authentication(target):
     adapter, wire = client([])
     with pytest.raises(CappError, match="invalid_target"):
-        adapter.get_capp(target, NAME)
+        (await adapter.get_capp(target, NAME))
     assert not wire.calls
 
 
@@ -484,20 +479,20 @@ def test_untrusted_targets_fail_before_authentication(target):
         lambda c: c.get_capp("team", "../other"),
     ],
 )
-def test_invalid_inputs_make_no_calls(operation):
+async def test_invalid_inputs_make_no_calls(operation):
     adapter, wire = client([])
     with pytest.raises(CappError):
-        operation(adapter)
+        (await operation(adapter))
     assert not wire.calls
 
 
 @pytest.mark.parametrize(
     "body", [{}, {"accessToken": "bad\ntoken"}, {**tokens(), "expiresAt": "invalid"}]
 )
-def test_malformed_auth(body):
+async def test_malformed_auth(body):
     adapter, _ = client([(HTTPStatus.OK, body)])
     with pytest.raises(CappError, match="malformed_response"):
-        adapter.get_capp("team", NAME)
+        (await adapter.get_capp("team", NAME))
 
 
 @pytest.mark.parametrize(
@@ -510,10 +505,10 @@ def test_malformed_auth(body):
         capp(status={"conditions": [{"type": "Ready", "status": "bad"}]}),
     ],
 )
-def test_malformed_resource(body):
+async def test_malformed_resource(body):
     adapter, _ = client([(HTTPStatus.OK, tokens()), (HTTPStatus.OK, body)])
     with pytest.raises(CappError, match="malformed_response"):
-        adapter.get_capp("team", NAME)
+        (await adapter.get_capp("team", NAME))
 
 
 @pytest.mark.parametrize(
@@ -527,7 +522,7 @@ def test_malformed_resource(body):
         {"wallets": []},
     ],
 )
-def test_invalid_configuration(changes):
+async def test_invalid_configuration(changes):
     with pytest.raises(CappError):
         CappClient(
             **{
@@ -542,7 +537,7 @@ def test_invalid_configuration(changes):
         )
 
 
-def test_environment_settings_and_safe_failures():
+async def test_environment_settings_and_safe_failures():
     with pytest.raises(CappError, match="configuration"):
         load_capp_client_settings({})
     env = dict(
@@ -558,16 +553,28 @@ def test_environment_settings_and_safe_failures():
     assert IDENTITY[1] not in str(caught.value) and caught.value.__context__ is None
 
 
-def test_no_redirects():
-    assert (
-        _NoRedirect().redirect_request(
-            None, None, HTTPStatus.TEMPORARY_REDIRECT, "", {}, "https://other"
+async def test_no_redirects():
+    calls = []
+
+    async def handler(request):
+        calls.append(str(request.url))
+        return httpx.Response(
+            HTTPStatus.TEMPORARY_REDIRECT, headers={"Location": "https://other"}
         )
-        is None
-    )
+
+    async with CappClient(
+        base_url="https://capp.example",
+        username=IDENTITY[0],
+        password=IDENTITY[1],
+        wallets={"team": "dev"},
+        transport=httpx.MockTransport(handler),
+    ) as adapter:
+        with pytest.raises(CappError):
+            await adapter.get_capp("team", NAME)
+    assert calls == [ROOT + "/auth/login"]
 
 
-def test_d18_resolves_uid_and_legacy_name():
+async def test_d18_resolves_uid_and_legacy_name():
     from uuid import UUID
     from src.bl.cascade_adapters import capp_name_for
 
@@ -577,19 +584,24 @@ def test_d18_resolves_uid_and_legacy_name():
     assert capp_name_for(automation_id, None) == NAME
 
 
-def test_default_d18_client_uses_server_configuration(monkeypatch):
-    from src.bl import cascade_adapters
+async def test_default_d18_client_uses_server_configuration(monkeypatch):
+    from fastapi import FastAPI, Request
+    from src.api.deps import get_capp_deletion_client
 
     monkeypatch.setenv("CAPP_BASE_URL", "https://capp.example")
     monkeypatch.setenv("CAPP_USERNAME", IDENTITY[0])
     monkeypatch.setenv("CAPP_PASSWORD", IDENTITY[1])
     monkeypatch.setenv("CAPP_ONBOARDED_WALLETS", '{"team":"dev"}')
-    monkeypatch.setattr(cascade_adapters, "_default_capp", None)
-    adapter = cascade_adapters.get_default_capp_deletion_client()
+    app = FastAPI()
+    request = Request({"type": "http", "app": app})
+    adapter = await get_capp_deletion_client(request)
     assert isinstance(adapter, CappClient)
-    assert adapter is cascade_adapters.get_default_capp_deletion_client()
-    with pytest.raises(CappError, match="invalid_target"):
-        adapter.delete_capp("unregistered", NAME)
+    assert adapter is await get_capp_deletion_client(request)
+    try:
+        with pytest.raises(CappError, match="invalid_target"):
+            await adapter.delete_capp("unregistered", NAME)
+    finally:
+        await adapter.aclose()
 
 
 @pytest.mark.parametrize(
@@ -604,22 +616,22 @@ def test_default_d18_client_uses_server_configuration(monkeypatch):
     ],
 )
 @pytest.mark.parametrize("during_login", [True, False])
-def test_http_failures_have_consistent_typed_codes(
+async def test_http_failures_have_consistent_typed_codes(
     status, code, retryable, during_login
 ):
     replies = [] if during_login else [(HTTPStatus.OK, tokens())]
     adapter, wire = client([*replies, (status, {"error": IDENTITY[1]})])
     with pytest.raises(CappError) as caught:
-        adapter.get_capp("team", NAME)
+        (await adapter.get_capp("team", NAME))
     assert caught.value.code is code
     assert caught.value.http_status == status
     assert caught.value.retryable is retryable
     assert len(wire.calls) == len(replies) + 1
 
 
-def test_condition_enums_preserve_wire_values():
+async def test_condition_enums_preserve_wire_values():
     adapter, _ = client([(HTTPStatus.OK, tokens()), (HTTPStatus.OK, capp())])
-    condition = adapter.get_capp("team", NAME).conditions[0]
+    condition = (await adapter.get_capp("team", NAME)).conditions[0]
     assert condition.status is ConditionStatus.TRUE
     assert condition.source is ConditionSource.KNATIVE
     assert json.dumps({"status": condition.status, "source": condition.source}) == (
@@ -640,15 +652,15 @@ def test_condition_enums_preserve_wire_values():
         {"resourceVersion": {}},
     ],
 )
-def test_malformed_nested_fields_are_sanitized(changes):
+async def test_malformed_nested_fields_are_sanitized(changes):
     adapter, _ = client([(HTTPStatus.OK, tokens()), (HTTPStatus.OK, capp(**changes))])
     with pytest.raises(CappError) as caught:
-        adapter.get_capp("team", NAME)
+        (await adapter.get_capp("team", NAME))
     assert caught.value.code is CappErrorCode.MALFORMED_RESPONSE
     assert caught.value.__context__ is None
 
 
-def test_invalid_port_is_rejected_before_network():
+async def test_invalid_port_is_rejected_before_network():
     with pytest.raises(CappError) as caught:
         CappClient(
             base_url="https://capp.example:invalid",
@@ -658,3 +670,168 @@ def test_invalid_port_is_rejected_before_network():
         )
     assert caught.value.code is CappErrorCode.CONFIGURATION
     assert caught.value.__context__ is None
+
+
+async def test_slow_requests_overlap_and_login_happens_once():
+    active = 0
+    maximum = 0
+    login_calls = 0
+    both_started = asyncio.Event()
+
+    async def handler(request):
+        nonlocal active, maximum, login_calls
+        if request.url.path.endswith("/login"):
+            login_calls += 1
+            await asyncio.sleep(0)
+            return httpx.Response(HTTPStatus.OK, json=tokens())
+        active += 1
+        maximum = max(maximum, active)
+        if active == 2:
+            both_started.set()
+        await asyncio.wait_for(both_started.wait(), timeout=1)
+        active -= 1
+        return httpx.Response(HTTPStatus.OK, json=capp())
+
+    async with CappClient(
+        base_url="https://capp.example",
+        username=IDENTITY[0],
+        password=IDENTITY[1],
+        wallets={"team": "dev"},
+        transport=httpx.MockTransport(handler),
+        clock=lambda: NOW,
+    ) as adapter:
+        await asyncio.gather(
+            adapter.get_capp("team", NAME), adapter.get_capp("team", NAME)
+        )
+    assert maximum == 2 and login_calls == 1
+    assert adapter._http.is_closed
+
+
+async def test_concurrent_401_responses_share_one_refresh():
+    first_requests = 0
+    refreshes = 0
+    both_failed = asyncio.Event()
+
+    async def handler(request):
+        nonlocal first_requests, refreshes
+        if request.url.path.endswith("/login"):
+            return httpx.Response(HTTPStatus.OK, json=tokens())
+        if request.url.path.endswith("/refresh"):
+            refreshes += 1
+            await asyncio.sleep(0)
+            return httpx.Response(HTTPStatus.OK, json=tokens("new-access"))
+        if request.headers["Authorization"] == "Bearer " + IDENTITY[2]:
+            first_requests += 1
+            if first_requests == 2:
+                both_failed.set()
+            await asyncio.wait_for(both_failed.wait(), timeout=1)
+            return httpx.Response(HTTPStatus.UNAUTHORIZED)
+        return httpx.Response(HTTPStatus.OK, json=capp())
+
+    async with CappClient(
+        base_url="https://capp.example",
+        username=IDENTITY[0],
+        password=IDENTITY[1],
+        wallets={"team": "dev"},
+        transport=httpx.MockTransport(handler),
+        clock=lambda: NOW,
+    ) as adapter:
+        await asyncio.gather(
+            adapter.get_capp("team", NAME), adapter.get_capp("team", NAME)
+        )
+    assert first_requests == 2 and refreshes == 1
+
+
+async def test_total_deadline_bounds_slow_stream_and_closes_response():
+    class SlowStream(httpx.AsyncByteStream):
+        closed = False
+
+        async def __aiter__(self):
+            yield b"{"
+            await asyncio.sleep(10)
+
+        async def aclose(self):
+            self.closed = True
+
+    stream = SlowStream()
+    mutations = 0
+
+    async def handler(request):
+        nonlocal mutations
+        if request.url.path.endswith("/login"):
+            return httpx.Response(HTTPStatus.OK, json=tokens())
+        mutations += 1
+        return httpx.Response(HTTPStatus.CREATED, stream=stream)
+
+    async with CappClient(
+        base_url="https://capp.example",
+        username=IDENTITY[0],
+        password=IDENTITY[1],
+        wallets={"team": "dev"},
+        timeout_seconds=0.05,
+        transport=httpx.MockTransport(handler),
+        clock=lambda: NOW,
+    ) as adapter:
+        with pytest.raises(CappError) as caught:
+            await adapter.create_capp("team", CappRequest(NAME, IMAGE))
+        assert caught.value.code is CappErrorCode.TIMEOUT
+        assert caught.value.__context__ is None
+    assert stream.closed and mutations == 1
+
+
+async def test_cancelled_login_releases_auth_lock():
+    started = asyncio.Event()
+    calls = 0
+
+    async def handler(request):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            started.set()
+            await asyncio.Event().wait()
+        return httpx.Response(HTTPStatus.OK, json=tokens())
+
+    async with CappClient(
+        base_url="https://capp.example",
+        username=IDENTITY[0],
+        password=IDENTITY[1],
+        wallets={"team": "dev"},
+        transport=httpx.MockTransport(handler),
+        clock=lambda: NOW,
+    ) as adapter:
+        task = asyncio.create_task(adapter._authenticate())
+        await asyncio.wait_for(started.wait(), timeout=1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert not adapter._auth_lock.locked()
+        assert await asyncio.wait_for(adapter._authenticate(), timeout=1) == IDENTITY[2]
+    assert calls == 2
+
+
+async def test_app_lifespan_closes_its_client_and_does_not_share_across_apps(
+    monkeypatch,
+):
+    from fastapi import FastAPI, Request
+    from src.api.deps import get_capp_deletion_client
+    from src.main import lifespan
+
+    for name, value in {
+        "CAPP_BASE_URL": "https://capp.example",
+        "CAPP_USERNAME": IDENTITY[0],
+        "CAPP_PASSWORD": IDENTITY[1],
+        "CAPP_ONBOARDED_WALLETS": '{"team":"dev"}',
+    }.items():
+        monkeypatch.setenv(name, value)
+    first_app, second_app = FastAPI(), FastAPI()
+    async with lifespan(first_app), lifespan(second_app):
+        first = await get_capp_deletion_client(
+            Request({"type": "http", "app": first_app})
+        )
+        second = await get_capp_deletion_client(
+            Request({"type": "http", "app": second_app})
+        )
+        assert first is not second
+        assert not first._http.is_closed and not second._http.is_closed
+    assert first._http.is_closed and second._http.is_closed
+    assert not hasattr(first_app.state, "capp_client")

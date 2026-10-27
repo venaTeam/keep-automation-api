@@ -24,8 +24,8 @@ API replicas, the DELETE's attempt racing a reconciler resume — may repeat a
 step but can never move the checkpoint backward or skip one. No Python lock is
 involved.
 
-**Blocking I/O shape (ADR-008).** Every function here is synchronous and runs in
-the threadpool. External calls happen with no DB session open: a snapshot is
+**I/O shape (ADR-008).** Orchestration and CAPP calls are async. Database,
+registry, Git, and reload work run in the threadpool. External calls happen with no DB session open: a snapshot is
 read in one short session, the external call runs, and the checkpoint is written
 in a second short session. The adapters own their network timeouts.
 
@@ -40,10 +40,13 @@ that polls cannot pile up concurrent attempts against CAPP. Retrying a stopped
 cascade belongs to the reconciler: E21's CronJob → D20's internal route →
 `resume_delete` (spec §6.2).
 """
+
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from uuid import UUID
 
+from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import func, select, update
 
 from src.bl.automations_bl import scoped_get
@@ -247,6 +250,15 @@ def _external(step: int, code: str, call, *args) -> None:
         raise CascadeStepError(step, code, exc) from exc
 
 
+async def _external_async(
+    step: int, code: str, call: Callable[..., Awaitable[None]], *args
+) -> None:
+    try:
+        await call(*args)
+    except Exception as exc:
+        raise CascadeStepError(step, code, exc) from exc
+
+
 def _save(automation_id: UUID, completed: int, **values) -> None:
     try:
         _checkpoint(automation_id, completed, **values)
@@ -262,18 +274,20 @@ def _step_mark_deleting(automation: Automation, deps: CascadeDeps) -> None:
     deps.publisher.publish_reload()
 
 
-def _step_delete_capp_resources(automation: Automation, deps: CascadeDeps) -> None:
+async def _step_delete_capp_resources(
+    automation: Automation, deps: CascadeDeps
+) -> None:
     wallet = automation.namespace
     # 2a then 2b, always both — even with no capp_deployment_id: a first deploy
     # can create the run-auth Secret and fail before the id is stored.
-    _external(
+    await _external_async(
         STEP_CAPP_RESOURCES_DELETED,
         "capp_delete_failed",
         deps.capp.delete_capp,
         wallet,
         capp_name_for(automation.id, automation.capp_deployment_id),
     )
-    _external(
+    await _external_async(
         STEP_CAPP_RESOURCES_DELETED,
         "run_auth_secret_delete_failed",
         deps.capp.delete_secret,
@@ -282,7 +296,12 @@ def _step_delete_capp_resources(automation: Automation, deps: CascadeDeps) -> No
     )
     # 2c: the DB key goes in the checkpoint's own transaction, and only after
     # both CAPP deletions succeeded — a failed 2a/2b keeps it for the retry.
-    _save(automation.id, STEP_CAPP_RESOURCES_DELETED, **_run_auth_key_clear_values())
+    await run_in_threadpool(
+        _save,
+        automation.id,
+        STEP_CAPP_RESOURCES_DELETED,
+        **_run_auth_key_clear_values()
+    )
 
 
 def _step_delete_images(automation: Automation, deps: CascadeDeps) -> None:
@@ -327,16 +346,15 @@ def _step_mark_deleted(automation: Automation, deps: CascadeDeps) -> None:
     _save(automation.id, STEP_DELETED, matching_state=MatchingState.DELETED)
 
 
-_STEPS = {
+_SYNC_STEPS = {
     STEP_MARKED_DELETING: _step_mark_deleting,
-    STEP_CAPP_RESOURCES_DELETED: _step_delete_capp_resources,
     STEP_IMAGES_DELETED: _step_delete_images,
     STEP_SCRIPT_ARCHIVED: _step_archive_script,
     STEP_DELETED: _step_mark_deleted,
 }
 
 
-def run_cascade(automation_id: UUID, deps: CascadeDeps) -> CascadeResult:
+async def run_cascade(automation_id: UUID, deps: CascadeDeps) -> CascadeResult:
     """Continue the cascade from the step after `delete_cascade_step`.
 
     - `deleted` → no-op, returns final progress.
@@ -345,7 +363,7 @@ def run_cascade(automation_id: UUID, deps: CascadeDeps) -> CascadeResult:
     - `deleting` → runs the remaining steps; stops at the first failure and
       returns progress with a sanitized `error` code.
     """
-    automation = _snapshot(automation_id)
+    automation = await run_in_threadpool(_snapshot, automation_id)
     for _ in range(_MAX_ITERATIONS):
         if automation.matching_state == MatchingState.DELETED:
             return _result(automation)
@@ -354,7 +372,10 @@ def run_cascade(automation_id: UUID, deps: CascadeDeps) -> CascadeResult:
 
         next_step = (automation.delete_cascade_step or 0) + 1
         try:
-            _STEPS[next_step](automation, deps)
+            if next_step == STEP_CAPP_RESOURCES_DELETED:
+                await _step_delete_capp_resources(automation, deps)
+            else:
+                await run_in_threadpool(_SYNC_STEPS[next_step], automation, deps)
         except CascadeStepError as exc:
             logger.warning(
                 "automations: delete cascade for %s stopped at step %s: %s (%s)",
@@ -366,7 +387,7 @@ def run_cascade(automation_id: UUID, deps: CascadeDeps) -> CascadeResult:
             return _result(automation, error=exc.code)
         # Re-read whether or not our checkpoint won: a lost compare-and-set
         # means another runner advanced the row, and we continue from there.
-        automation = _snapshot(automation_id)
+        automation = await run_in_threadpool(_snapshot, automation_id)
 
     logger.error(
         "automations: delete cascade for %s made no progress in %s iterations",
@@ -376,16 +397,16 @@ def run_cascade(automation_id: UUID, deps: CascadeDeps) -> CascadeResult:
     return _result(automation, error="cascade_no_progress")
 
 
-def resume_delete(automation_id: UUID, deps: CascadeDeps) -> CascadeResult:
+async def resume_delete(automation_id: UUID, deps: CascadeDeps) -> CascadeResult:
     """Business logic behind D20's `POST /internal/automations/{id}/resume-delete`.
 
     Internal and unscoped by tenant (the reconciler acts across tenants). The
     only retry path for a stopped cascade; every step is safe to repeat.
     """
-    return run_cascade(automation_id, deps)
+    return await run_cascade(automation_id, deps)
 
 
-def run_cascade_in_background(automation_id: UUID, deps: CascadeDeps) -> None:
+async def run_cascade_in_background(automation_id: UUID, deps: CascadeDeps) -> None:
     """The first cascade attempt, started by the admitting DELETE. Never raises.
 
     Opens its own sessions and loads by id — it never captures the request's
@@ -393,7 +414,7 @@ def run_cascade_in_background(automation_id: UUID, deps: CascadeDeps) -> None:
     intact and the reconciler's `resume_delete` continues it.
     """
     try:
-        run_cascade(automation_id, deps)
+        await run_cascade(automation_id, deps)
     except Exception as exc:  # noqa: BLE001
         logger.error(
             "automations: delete cascade attempt for %s crashed (%s)",
@@ -433,7 +454,22 @@ class DeboardSummary:
         }
 
 
-def deboard_wallet(
+def _wallet_automation_ids(tenant_id: str, wallet_name: str) -> list[UUID]:
+    with get_session() as session:
+        return list(
+            session.scalars(
+                select(Automation.id)
+                .where(
+                    Automation.tenant_id == tenant_id,
+                    Automation.namespace == wallet_name,
+                    Automation.matching_state != MatchingState.DELETED,
+                )
+                .order_by(Automation.created_at, Automation.id)
+            ).all()
+        )
+
+
+async def deboard_wallet(
     tenant_id: str, wallet_name: str, actor: str, deps: CascadeDeps
 ) -> DeboardSummary:
     """Run the single-automation delete for every automation on a tenant's wallet.
@@ -451,18 +487,9 @@ def deboard_wallet(
     (namespace, quota, permissions) or any team Secret. No HTTP route: whoever
     adds a caller (F25 / ops) owns its entry point and authorization.
     """
-    with get_session() as session:
-        automation_ids = list(
-            session.scalars(
-                select(Automation.id)
-                .where(
-                    Automation.tenant_id == tenant_id,
-                    Automation.namespace == wallet_name,
-                    Automation.matching_state != MatchingState.DELETED,
-                )
-                .order_by(Automation.created_at, Automation.id)
-            ).all()
-        )
+    automation_ids = await run_in_threadpool(
+        _wallet_automation_ids, tenant_id, wallet_name
+    )
 
     deleted: list[UUID] = []
     in_progress: list[UUID] = []
@@ -470,7 +497,9 @@ def deboard_wallet(
     failed: list[UUID] = []
     for automation_id in automation_ids:
         try:
-            begin_delete(tenant_id, automation_id, actor, deps.publisher)
+            await run_in_threadpool(
+                begin_delete, tenant_id, automation_id, actor, deps.publisher
+            )
         except AutomationBuildingError:
             skipped_building.append(automation_id)
             continue
@@ -485,7 +514,7 @@ def deboard_wallet(
             continue
 
         try:
-            result = run_cascade(automation_id, deps)
+            result = await run_cascade(automation_id, deps)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "automations: deboard cascade for %s crashed (%s)",
