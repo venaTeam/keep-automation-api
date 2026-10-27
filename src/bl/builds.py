@@ -74,6 +74,11 @@ from src.models.db.automation_revision import AutomationRevision, RevisionAction
 logger = logging.getLogger(__name__)
 
 BUILD_EVENT_TYPE = "build"
+# Recorded as `actor` on build-outcome revisions: the machine tier has no human
+# identity, and the shared token does not say which pipeline sent the webhook.
+BUILD_ACTOR = "ci-webhook"
+# The human actions that commit a script and so request a build.
+_REQUESTING_ACTIONS = (RevisionAction.CREATE, RevisionAction.EDIT)
 
 
 @dataclass(frozen=True)
@@ -122,12 +127,26 @@ def _failure_raced(session, automation: Automation, commit_sha: str) -> bool:
         select(AutomationRevision.git_sha)
         .where(
             AutomationRevision.automation_id == automation.id,
-            AutomationRevision.action.in_((RevisionAction.CREATE, RevisionAction.EDIT)),
+            AutomationRevision.action.in_(_REQUESTING_ACTIONS),
         )
         .order_by(AutomationRevision.created_at.desc())
         .limit(1)
     ).first()
     return latest_sha == commit_sha
+
+
+def _build_revision(
+    event: CiWebhookIn, action: RevisionAction, digest: str | None
+) -> AutomationRevision:
+    """The audit row for an applied build outcome (spec §8.4: no unaudited
+    state transition). Written in the same transaction as the state change."""
+    return AutomationRevision(
+        automation_id=event.automation_id,
+        action=action,
+        git_sha=event.commit_sha,
+        resulting_digest=digest,
+        actor=BUILD_ACTOR,
+    )
 
 
 def _ignored(event: CiWebhookIn, reason: IgnoredReason) -> CiWebhookOut:
@@ -308,8 +327,12 @@ def apply_build_result(
             .where(
                 AutomationRevision.automation_id == event.automation_id,
                 AutomationRevision.git_sha == event.commit_sha,
+                AutomationRevision.action.in_(_REQUESTING_ACTIONS),
             )
             .values(resulting_digest=event.image)
+        )
+        session.add(
+            _build_revision(event, RevisionAction.BUILD_SUCCEEDED, event.image)
         )
         session.commit()
         session.refresh(automation)
@@ -341,6 +364,7 @@ def _record_failure(
         automation.build_lock_deadline = None
         automation.updated_at = datetime.now(timezone.utc)
         session.add(automation)
+        session.add(_build_revision(event, RevisionAction.BUILD_FAILED, None))
         session.commit()
         session.refresh(automation)
         build_event = _build_event(automation, event.commit_sha)

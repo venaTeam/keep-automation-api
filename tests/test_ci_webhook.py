@@ -144,7 +144,7 @@ def revisions(test_engine, automation_id: str) -> list[dict]:
             dict(r)
             for r in conn.execute(
                 text(
-                    "SELECT action, git_sha, resulting_digest FROM automation_revisions "
+                    "SELECT action, git_sha, resulting_digest, actor FROM automation_revisions "
                     "WHERE automation_id = :id ORDER BY created_at"
                 ),
                 {"id": automation_id},
@@ -428,8 +428,12 @@ def test_first_build_success_deploys_and_cuts_over(harness, test_engine):
     assert automation["build_lock_deadline"] is None
     # First build lands inactive — "ready to enable", never auto-armed.
     assert automation["matching_state"] == "inactive"
+    # The create learns its digest; the cutover itself is audited (spec §8.4).
     assert revisions(test_engine, created["id"]) == [
-        {"action": "create", "git_sha": sha, "resulting_digest": built}
+        {"action": "create", "git_sha": sha, "resulting_digest": built,
+         "actor": "noauth@keep"},
+        {"action": "build_succeeded", "git_sha": sha, "resulting_digest": built,
+         "actor": "ci-webhook"},
     ]
     assert harness.reload.count == 1
     assert harness.events.events == [
@@ -467,6 +471,11 @@ def test_first_build_failure_marks_build_failed(harness, test_engine):
     assert automation["build_lock_deadline"] is None
     assert harness.capp.calls == []
     assert harness.reload.count == 0
+    # Audited (spec §8.4): the next edit overwrites `build_failed`, this row stays.
+    assert revisions(test_engine, created["id"])[-1] == {
+        "action": "build_failed", "git_sha": sha, "resulting_digest": None,
+        "actor": "ci-webhook",
+    }
     assert harness.events.events == [
         {
             "type": "build",
@@ -549,8 +558,14 @@ def test_edit_build_success_rolls_out_existing_deployment(harness, test_engine):
     # Only the edit's revision learns the new digest; the create's keeps v1.
     create_sha = revisions(test_engine, automation_id)[0]["git_sha"]
     assert revisions(test_engine, automation_id) == [
-        {"action": "create", "git_sha": create_sha, "resulting_digest": image(automation_id)},
-        {"action": "edit", "git_sha": sha, "resulting_digest": new_image},
+        {"action": "create", "git_sha": create_sha, "resulting_digest": image(automation_id),
+         "actor": "noauth@keep"},
+        {"action": "build_succeeded", "git_sha": create_sha,
+         "resulting_digest": image(automation_id), "actor": "ci-webhook"},
+        {"action": "edit", "git_sha": sha, "resulting_digest": new_image,
+         "actor": "noauth@keep"},
+        {"action": "build_succeeded", "git_sha": sha, "resulting_digest": new_image,
+         "actor": "ci-webhook"},
     ]
     assert harness.reload.count == 2
     assert harness.events.events[-1]["active_digest"] == new_image
@@ -1008,6 +1023,14 @@ def test_failure_for_the_same_commit_during_the_capp_call_does_not_strand_capp(
     assert automation["active_digest"] == image(automation_id, version)
     assert automation["capp_deployment_id"] == capp.deployments[automation_id].deployment_id
     assert events.events[-1]["build_state"] == "idle"
+    # Both transitions are on the record, in order; the digest stamp for the
+    # requesting revision never lands on the failure row.
+    outcomes = [r for r in revisions(test_engine, automation_id) if r["git_sha"] == sha]
+    assert [(r["action"], r["resulting_digest"]) for r in outcomes] == [
+        ("create" if first_build else "edit", image(automation_id, version)),
+        ("build_failed", None),
+        ("build_succeeded", image(automation_id, version)),
+    ]
 
 
 def test_success_never_overrides_an_edit_made_after_the_raced_failure(

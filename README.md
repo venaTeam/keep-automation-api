@@ -197,6 +197,11 @@ automation's build finishes. Payload, responses and the SSE event shape are in
 | `AUTOMATION_EVENTS_CHANNEL` | `automation-events` | Build events for the `GET /events` SSE stream (D19 subscribes). |
 | `REDIS_PUBLISH_TIMEOUT_SECONDS` | `1.0` | Bounds each publish; failures are logged and swallowed. |
 
+Every applied outcome writes an `automation_revisions` row (`build_succeeded` /
+`build_failed`, actor `ci-webhook`). Those enum values need keep-migrations
+revision `revision_action_build_outcomes` applied **before** this service
+deploys — otherwise every applied webhook fails on the insert.
+
 For local poking without CI, send the webhook yourself (the row's
 `building_sha` is the `commit_sha` to use). Until D16 lands a success webhook
 answers 503 — the build stays `building`; a `failed` one works.
