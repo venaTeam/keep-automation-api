@@ -19,7 +19,17 @@ class ExternalDependencyNotConfiguredError(RuntimeError):
 
 
 def capp_name_for(automation_id: UUID, capp_deployment_id: str | None) -> str:
-    """Stored resource name, or the name used by an unfinished first deploy."""
+    """CAPP paths take names, not UIDs returned by create (D16).
+
+    Retain compatibility with rows that stored the name before D16. A UID
+    needs the deterministic name used by the deployment coordinator.
+    """
+    if capp_deployment_id:
+        try:
+            UUID(capp_deployment_id)
+        except ValueError:
+            return capp_deployment_id
+        return f"automation-{automation_id}"
     return capp_deployment_id or f"automation-{automation_id}"
 
 
@@ -70,13 +80,20 @@ class UnconfiguredRegistryClient:
         raise ExternalDependencyNotConfiguredError("Artifactory settings missing (A0)")
 
 
-_default_capp = UnconfiguredCappDeletionClient()
+_default_capp: CappDeletionClient | None = None
+_capp_lock = threading.Lock()
 _default_registry: RegistryClient | None = None
 _registry_lock = threading.Lock()
 
 
 def get_default_capp_deletion_client() -> CappDeletionClient:
-    return _default_capp
+    global _default_capp
+    from src.bl.capp_client import CappClient
+
+    with _capp_lock:
+        if _default_capp is None:
+            _default_capp = CappClient(**config.load_capp_client_settings())
+        return _default_capp
 
 
 def get_default_registry_client() -> RegistryClient:

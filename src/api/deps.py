@@ -43,7 +43,7 @@ def get_reload_publisher() -> ReloadPublisher:
 
 
 def get_capp_deletion_client() -> CappDeletionClient:
-    """CAPP Capp/Secret deletion. Fails closed until D16's client is wired."""
+    """D16 CAPP client; configured wallets and identity are server-owned."""
     return get_default_capp_deletion_client()
 
 

@@ -3,6 +3,7 @@
 Skeleton (D12): only what the app shell needs. Concrete values (tokens, DB DSN,
 CAPP identity) are provisioned by A0 and consumed by later stories.
 """
+import json
 import os
 from collections.abc import Mapping
 
@@ -154,3 +155,25 @@ ARTIFACTORY_PASSWORD = os.environ.get("ARTIFACTORY_PASSWORD", "")
 ARTIFACTORY_TIMEOUT_SECONDS = float(
     os.environ.get("ARTIFACTORY_TIMEOUT_SECONDS", "10")
 )
+
+
+# Inject only into this service from the deployment secret store. Loading is
+# lazy so unprovisioned local installations can still run unrelated endpoints.
+def load_capp_client_settings(environ: Mapping[str, str] | None = None) -> dict:
+    from src.bl.capp_errors import CappError
+
+    env = os.environ if environ is None else environ
+    settings = None
+    try:
+        settings = dict(
+            base_url=env["CAPP_BASE_URL"],
+            username=env["CAPP_USERNAME"],
+            password=env["CAPP_PASSWORD"],
+            timeout_seconds=float(env.get("CAPP_REQUEST_TIMEOUT_SECONDS", "30")),
+            wallets=json.loads(env.get("CAPP_ONBOARDED_WALLETS", "{}")),
+        )
+    except (KeyError, ValueError, TypeError):
+        pass
+    if settings is None:
+        raise CappError("configuration")
+    return settings

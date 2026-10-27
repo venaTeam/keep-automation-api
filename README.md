@@ -198,3 +198,8 @@ stand-in — see the note at the top of `tests/conftest.py`.
 - Real CAPP deletion client + run-auth key column (**D16/F24**), A0 Artifactory deployment configuration, and git archive adapter (**D14**).
 - Deploy + NetworkPolicy manifests — handled out-of-repo (A0 infra).
 - Real identity-provider integration + tier token verification.
+# CAPP integration (D16)
+
+See [the CAPP adapter guide](docs/d16-capp-client.md) for service-secret
+configuration, trusted wallet mapping, rollout/deletion interfaces, sanitized
+errors, and the opt-in dev hello acceptance test.
