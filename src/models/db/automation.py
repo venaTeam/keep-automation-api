@@ -63,7 +63,7 @@ class Automation(SQLModel, table=True):
         # covering: hydration also reads `triggers`, `cooldown_fields`,
         # `cooldown_seconds` and `grace_seconds`, so every matched row is a heap
         # fetch regardless.
-        # Names must match the keep-api-gateway revision that actually creates
+        # Names must match the keep-migrations revision that actually creates
         # these indexes (`create_automation_tables`) — that migration is the DB
         # truth; this declaration only builds the test schema.
         Index("ix_automations_matching_state_tenant_id", "matching_state", "tenant_id"),

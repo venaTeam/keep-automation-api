@@ -29,6 +29,7 @@ def test_all_fixture_codes_are_enum_members():
         "field_error.json",
         "error_shape_example.json",
         "active_digest_required_error.json",
+        "namespace_immutable_error.json",
     ):
         payload = json.loads((FIXTURES / name).read_text())
         errors = payload.get("errors", [payload])

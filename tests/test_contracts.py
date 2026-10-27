@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from src.contracts.validation_errors import ErrorCode
 from src.contracts import (
     COOLDOWN_SECONDS_MAX,
     GRACE_SECONDS_DEFAULT,
@@ -79,3 +80,14 @@ def test_grace_default_covers_timeout_default():
 def test_required_and_optional_disjoint():
     assert not set(MATCHABLE_REQUIRED) & set(MATCHABLE_OPTIONAL)
     assert len(MATCHABLE_FIELDS) == len(MATCHABLE_REQUIRED) + len(MATCHABLE_OPTIONAL)
+
+
+@requires_doc
+def test_error_codes_match_contracts_doc():
+    # The UI keys off `code`: a code the API can emit but the doc does not list
+    # (or the reverse) is a silent contract break.
+    doc = CONTRACTS_DOC.read_text(encoding="utf-8")
+    section = doc.split("## Validation errors", 1)[1].split("\n## ", 1)[0]
+    table = section.split("**Error codes**", 1)[1].split("**Numeric limits**", 1)[0]
+    documented = set(re.findall(r"^\| `([a-z_]+)` \|", table, re.MULTILINE))
+    assert documented == {code.value for code in ErrorCode}

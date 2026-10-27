@@ -19,7 +19,10 @@ call). Only once CAPP has accepted the image does a short transaction advance
 CAPP failure raises `CappUnavailableError` (→ 503) with the row untouched: still
 `building`, lock held, old digest live (spec §6.3) — a replay or the reconciler
 retries. The commit re-checks admission under `FOR UPDATE`, so two racing
-deliveries of one webhook cut over once (both CAPP calls are idempotent).
+deliveries of one webhook cut over once (both CAPP calls are idempotent). A
+`failed` for the same commit that lands during the CAPP call does not strand
+CAPP ahead of the row: the re-check finds `build_failed` for this commit and
+the success still cuts over (`_failure_raced`) — CAPP already serves it.
 
 **Failure.** `build_state=build_failed`, lock released, `active_digest` and the
 deployment untouched: a first build has nothing to serve; an edit keeps serving
@@ -27,7 +30,8 @@ the previous digest (spec §5.1). PUT is allowed again, so the author retries
 with a fresh edit. A failure report is bound only by `building_sha`, not by an
 image: any holder of the shared webhook token who knows an automation's id and
 building SHA can fail its build. The worst case is a forced re-edit (no image
-reaches CAPP this way); closing it needs per-pipeline tokens (open question).
+reaches CAPP this way, and a success already mid-cutover still wins); closing it
+needs per-pipeline tokens (open question).
 
 The matching axis is never touched here: a first build lands `inactive`
 ("ready to enable", D18 enables); an edit of an active automation simply
@@ -65,7 +69,7 @@ from src.models.api.ci_webhook import (
     is_valid_repository,
 )
 from src.models.db.automation import DELETION_STATES, Automation, BuildState
-from src.models.db.automation_revision import AutomationRevision
+from src.models.db.automation_revision import AutomationRevision, RevisionAction
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +105,29 @@ def _load(session, automation_id: UUID, lock: bool = False) -> Automation:
     if automation is None:
         raise AutomationNotFoundError()
     return automation
+
+
+def _failure_raced(session, automation: Automation, commit_sha: str) -> bool:
+    """True when the row is `build_failed` *for this commit* — a failure
+    recorded while this success was inside its CAPP call.
+
+    `building_sha` is cleared by the failure, so the commit is recovered from
+    the latest create/edit revision. Any newer edit has claimed the row
+    (`building`, not `build_failed`) or written a newer revision, so it is
+    never overridden. Only reached after CAPP accepted this commit's image.
+    """
+    if automation.build_state != BuildState.BUILD_FAILED:
+        return False
+    latest_sha = session.scalars(
+        select(AutomationRevision.git_sha)
+        .where(
+            AutomationRevision.automation_id == automation.id,
+            AutomationRevision.action.in_((RevisionAction.CREATE, RevisionAction.EDIT)),
+        )
+        .order_by(AutomationRevision.created_at.desc())
+        .limit(1)
+    ).first()
+    return latest_sha == commit_sha
 
 
 def _ignored(event: CiWebhookIn, reason: IgnoredReason) -> CiWebhookOut:
@@ -233,6 +260,19 @@ def apply_build_result(
     with get_session() as session:
         automation = _load(session, event.automation_id, lock=True)
         reason = _admission(automation, event.commit_sha)
+        if reason == IgnoredReason.NOT_BUILDING and _failure_raced(
+            session, automation, event.commit_sha
+        ):
+            # A `failed` for this same commit landed while CAPP was accepting
+            # the image. CAPP serves it now, so the row follows CAPP.
+            logger.warning(
+                "ci-webhook: failure for automation=%s sha=%s was recorded "
+                "during the CAPP %s; success overrides it",
+                event.automation_id,
+                event.commit_sha,
+                operation,
+            )
+            reason = None
         if reason is not None:
             if automation.active_digest != event.image:
                 # Not a duplicate delivery: CAPP accepted the image but the row

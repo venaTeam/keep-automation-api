@@ -13,6 +13,7 @@ deploy/rollout failed — nothing was recorded, safe to redeliver.
 from fastapi import APIRouter, Depends, status
 from fastapi.concurrency import run_in_threadpool
 
+from src.api.ci_webhook_guard import CI_WEBHOOK_PATH
 from src.api.deps import (
     get_capp_client,
     get_event_publisher,
@@ -29,7 +30,8 @@ router = APIRouter(dependencies=[Depends(verify_ci_webhook_token)])
 
 
 @router.post(
-    "/internal/ci-webhook",
+    # The guard matches this exact path; one constant keeps them together.
+    CI_WEBHOOK_PATH,
     status_code=status.HTTP_200_OK,
     response_model=CiWebhookOut,
     response_model_exclude_none=True,

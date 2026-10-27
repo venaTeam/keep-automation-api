@@ -44,7 +44,7 @@ GITLAB_TIMEOUT_SECONDS = float(os.environ.get("GITLAB_TIMEOUT_SECONDS", "5"))
 # separate `automations` database and no separate DSN.
 #
 # One database ⇒ one Alembic lineage: these tables' migrations live in
-# keep-api-gateway. This service owns the ORM models, not the schema lineage,
+# keep-migrations. This service owns the ORM models, not the schema lineage,
 # and this repo has no `alembic.ini`/`migrations/`.
 #
 # TWO ACCEPTED VARIABLE NAMES, ON PURPOSE — do not "clean this up".

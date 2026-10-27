@@ -1,9 +1,11 @@
 """CI webhook (D15, spec §8.2, §5.1): token gate, cutover, failure, idempotency."""
 import asyncio
+import json
 import logging
 import threading
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -31,6 +33,7 @@ from tests.conftest import OTHER_TENANT, TENANT
 TOKEN = "ci-secret-token"
 AUTH = {"X-Gitlab-Token": TOKEN}
 REPOSITORY = "artifactory.test/automations"
+FIXTURES = Path(__file__).parent / "fixtures"
 
 AUTOMATION = {
     "name": "restart-payments",
@@ -418,7 +421,7 @@ def test_first_build_success_deploys_and_cuts_over(harness, test_engine):
     automation = row(test_engine, created["id"])
     assert automation["active_digest"] == built
     assert automation["contract_version"] == "1"
-    assert automation["capp_deployment_id"] == f"capp-{created['id']}"
+    assert automation["capp_deployment_id"] == f"automation-{created['id']}"
     assert automation["deployment_url"].endswith(created["id"])
     assert automation["build_state"] == "idle"
     assert automation["building_sha"] is None
@@ -505,7 +508,7 @@ def test_retry_after_failed_first_build_creates_the_deployment(harness, test_eng
     assert harness.webhook(success(created["id"], sha)).json() == {"status": "applied"}
     # Still no deployment existed, so this build creates it (not a rollout).
     assert [c[0] for c in harness.capp.calls] == ["create"]
-    assert row(test_engine, created["id"])["capp_deployment_id"] == f"capp-{created['id']}"
+    assert row(test_engine, created["id"])["capp_deployment_id"] == f"automation-{created['id']}"
 
 
 # --- edits --------------------------------------------------------------------
@@ -535,13 +538,13 @@ def test_edit_build_success_rolls_out_existing_deployment(harness, test_engine):
 
     assert resp.json() == {"status": "applied"}
     assert harness.capp.calls[-1] == (
-        "rollout", f"capp-{automation_id}", new_image, ("payments-secret",)
+        "rollout", f"automation-{automation_id}", new_image, ("payments-secret",)
     )
     assert len([c for c in harness.capp.calls if c[0] == "create"]) == 1
     automation = row(test_engine, automation_id)
     assert automation["active_digest"] == new_image
     assert automation["contract_version"] == "2"
-    assert automation["capp_deployment_id"] == f"capp-{automation_id}"
+    assert automation["capp_deployment_id"] == f"automation-{automation_id}"
     assert automation["build_state"] == "idle"
     # Only the edit's revision learns the new digest; the create's keeps v1.
     create_sha = revisions(test_engine, automation_id)[0]["git_sha"]
@@ -562,7 +565,7 @@ def test_rollout_mounts_the_edited_secret(harness, test_engine):
     harness.webhook(success(automation_id, sha, 2))
 
     assert harness.capp.calls[-1] == (
-        "rollout", f"capp-{automation_id}", image(automation_id, 2), ("rotated-secret",)
+        "rollout", f"automation-{automation_id}", image(automation_id, 2), ("rotated-secret",)
     )
 
 
@@ -575,15 +578,9 @@ def test_edit_cannot_move_a_deployed_automation_to_another_wallet(harness, test_
 
     resp = harness.edit(automation_id, expect=400, namespace="other-wallet")
 
-    assert resp.json() == {
-        "errors": [
-            {
-                "field": "namespace",
-                "code": "namespace_immutable",
-                "message": "a deployed automation cannot move to another wallet",
-            }
-        ]
-    }
+    # The golden fixture is the shape shared with the UI.
+    golden = json.loads((FIXTURES / "namespace_immutable_error.json").read_text())
+    assert resp.json() == golden
     assert row(test_engine, automation_id) == before
     assert revisions(test_engine, automation_id) == revisions_before
 
@@ -630,7 +627,7 @@ def test_failed_edit_build_keeps_old_digest_serving(harness, test_engine):
     assert automation["build_state"] == "build_failed"
     assert automation["active_digest"] == image(automation_id)
     assert harness.capp.calls == calls_before
-    assert harness.capp.images[f"capp-{automation_id}"] == image(automation_id)
+    assert harness.capp.images[f"automation-{automation_id}"] == image(automation_id)
 
 
 # --- CAPP failure -------------------------------------------------------------
@@ -673,7 +670,7 @@ def test_failed_rollout_keeps_old_digest(harness, test_engine):
                    "contract_version"):
         assert automation[column] == before[column]
     assert automation["active_digest"] == image(automation_id)
-    assert harness.capp.images[f"capp-{automation_id}"] == image(automation_id)
+    assert harness.capp.images[f"automation-{automation_id}"] == image(automation_id)
     assert harness.reload.count == reloads
     assert len(harness.events.events) == events
 
@@ -810,10 +807,11 @@ def test_commit_rechecks_admission_under_a_row_lock(harness, test_engine, outcom
 
 
 def test_unstored_create_then_wallet_edit_redeploys_in_the_new_wallet(harness, test_engine):
-    # Drift path: the lock is released (E21) while CAPP creates the
+    # Drift path: the lock is released (E21, to `idle`) while CAPP creates the
     # deployment, so its id is never stored; the author then moves the wallet
     # — allowed, the row has no deployment — and the next build must not land
-    # on the old-wallet deployment.
+    # on the old-wallet deployment. (A same-commit `failed` in that window is
+    # reconciled instead — see the test above.)
     created = harness.create()
     sha = row(test_engine, created["id"])["building_sha"]
 
@@ -821,7 +819,7 @@ def test_unstored_create_then_wallet_edit_redeploys_in_the_new_wallet(harness, t
         with test_engine.begin() as conn:
             conn.execute(
                 text(
-                    "UPDATE automations SET build_state = 'build_failed', "
+                    "UPDATE automations SET build_state = 'idle', "
                     "building_sha = NULL, build_lock_deadline = NULL WHERE id = :id"
                 ),
                 {"id": created["id"]},
@@ -847,8 +845,11 @@ def test_unstored_create_then_wallet_edit_redeploys_in_the_new_wallet(harness, t
         ("create", created["id"], "other-wallet", image(created["id"]), ("payments-secret",)),
         ("teardown", old_deployment),
     ]
+    # Same pinned name (`automation-{id}`), now in the new wallet; the old-wallet
+    # deployment was torn down first (the teardown call above).
     recreated = probe.deployments[created["id"]]
-    assert recreated.deployment_id != old_deployment
+    assert recreated.deployment_id == f"automation-{created['id']}"
+    assert probe.wallets[created["id"]] == "other-wallet"
     automation = row(test_engine, created["id"])
     assert automation["capp_deployment_id"] == recreated.deployment_id
     assert automation["deployment_url"] == recreated.deployment_url
@@ -956,6 +957,96 @@ def test_concurrent_duplicate_delivery_cuts_over_once(harness, test_engine, capl
     assert len(rival_events.events) == 1
     assert events.events == [] and reload.count == 0
     assert row(test_engine, created["id"])["active_digest"] == image(created["id"])
+
+
+@pytest.mark.parametrize("first_build", [True, False], ids=["create", "rollout"])
+def test_failure_for_the_same_commit_during_the_capp_call_does_not_strand_capp(
+    harness, test_engine, caplog, first_build
+):
+    # A retried job, a second pipeline, or any token holder reports `failed`
+    # for the commit whose success is mid-CAPP-call. CAPP has accepted the
+    # image, so the row must end up recording what CAPP serves — not
+    # `build_failed` with the old digest (or, on a first build, a deployment
+    # whose id was never stored).
+    if first_build:
+        created = harness.create()
+        automation_id = created["id"]
+    else:
+        automation_id = _built(harness, test_engine)
+        harness.edit(automation_id)
+    sha = row(test_engine, automation_id)["building_sha"]
+    version = 1 if first_build else 2
+
+    def report_failure():
+        result = builds.apply_build_result(
+            CiWebhookIn(**failed(automation_id, sha)),
+            InMemoryCappClient(),
+            RecordingReload(),
+            RecordingEvents(),
+        )
+        assert result.status == "applied"
+
+    capp = _ProbingCapp(test_engine, report_failure)
+    if not first_build:
+        capp.deployments[automation_id] = harness.capp.deployments[automation_id]
+        capp.wallets[automation_id] = harness.capp.wallets[automation_id]
+        capp.rollout = _with_hook(capp.rollout, report_failure)
+        capp.during_call = None
+    events = RecordingEvents()
+    with caplog.at_level(logging.WARNING):
+        result = builds.apply_build_result(
+            CiWebhookIn(**success(automation_id, sha, version)),
+            capp,
+            RecordingReload(),
+            events,
+        )
+
+    assert result.status == "applied"
+    assert "CAPP ahead of row" not in caplog.text
+    automation = row(test_engine, automation_id)
+    assert automation["build_state"] == "idle"
+    assert automation["active_digest"] == image(automation_id, version)
+    assert automation["capp_deployment_id"] == capp.deployments[automation_id].deployment_id
+    assert events.events[-1]["build_state"] == "idle"
+
+
+def test_success_never_overrides_an_edit_made_after_the_raced_failure(
+    harness, test_engine, caplog
+):
+    created = harness.create()
+    sha = row(test_engine, created["id"])["building_sha"]
+
+    def fail_then_edit():
+        builds.apply_build_result(
+            CiWebhookIn(**failed(created["id"], sha)),
+            InMemoryCappClient(),
+            RecordingReload(),
+            RecordingEvents(),
+        )
+        harness.edit(created["id"])
+
+    with caplog.at_level(logging.WARNING):
+        result = builds.apply_build_result(
+            CiWebhookIn(**success(created["id"], sha)),
+            _ProbingCapp(test_engine, fail_then_edit),
+            RecordingReload(),
+            RecordingEvents(),
+        )
+
+    assert (result.status, result.reason) == ("ignored", "sha_mismatch")
+    automation = row(test_engine, created["id"])
+    assert automation["build_state"] == "building"
+    assert automation["building_sha"] == revisions(test_engine, created["id"])[-1]["git_sha"]
+    assert automation["active_digest"] is None
+    assert "CAPP ahead of row" in caplog.text
+
+
+def _with_hook(call, hook):
+    def wrapped(**kwargs):
+        hook()
+        return call(**kwargs)
+
+    return wrapped
 
 
 def test_deletion_started_during_capp_call_is_not_cut_over(harness, test_engine, caplog):

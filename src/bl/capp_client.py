@@ -14,6 +14,9 @@ lock in place instead of advancing `active_digest` to an image nothing serves.
 Contract the real client must honour (automation-contracts.md §"CAPP
 integration"):
 
+- The deployment is named **`automation-{automation_id}`** and that name is
+  what `capp_deployment_id` stores — the delete cascade (`capp_name_for`)
+  falls back to it for a first deploy whose id was never stored.
 - `create_deployment` is keyed by `automation_id` and **idempotent**: if a
   deployment for that id already exists it returns it rather than creating a
   second one. The cutover commits *after* the CAPP call (no pooled connection
@@ -120,14 +123,14 @@ class InMemoryCappClient:
             self.calls.append(("teardown", deployment.deployment_id))
             self.images.pop(deployment.deployment_id, None)
             deployment = CappDeployment(
-                deployment_id=f"capp-{key}-{wallet}",
+                deployment_id=f"automation-{key}",
                 deployment_url=f"https://{wallet}.capp.test/{key}",
             )
             self.deployments[key] = deployment
             self.wallets[key] = wallet
         if deployment is None:
             deployment = CappDeployment(
-                deployment_id=f"capp-{key}",
+                deployment_id=f"automation-{key}",
                 deployment_url=f"https://{wallet}.capp.test/{key}",
             )
             self.deployments[key] = deployment

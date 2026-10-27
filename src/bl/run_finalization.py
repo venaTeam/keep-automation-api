@@ -1,8 +1,9 @@
 """Deletion-aware run finalization + build-mutation fencing (D18, spec §5.4, §9.3).
 
-These are the seams D15 (CI webhook cutover), D17 (submit loop) and D20/E21
-(reconciler repair) call so deletion is never misreported. None of those
-stories has landed; the functions are complete and tested on their own.
+These are the seams D17 (submit loop) and D20/E21 (reconciler repair) call so
+deletion is never misreported; D16 may use `lock_for_build_mutation`. D15's
+cutover (`builds.py`) takes the same bounded row lock via `lock_first` directly,
+because it needs the deleting row itself to log CAPP-ahead-of-row drift.
 
 **Runs killed by deletion.** Deleting the Capp tears down any in-flight `/run`
 (no drain grace). The disrupted call must be recorded as `failed` +

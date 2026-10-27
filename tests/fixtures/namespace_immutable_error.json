@@ -1,0 +1,9 @@
+{
+  "errors": [
+    {
+      "field": "namespace",
+      "code": "namespace_immutable",
+      "message": "a deployed automation cannot move to another wallet"
+    }
+  ]
+}
