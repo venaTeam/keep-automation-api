@@ -34,6 +34,14 @@ class RunNotFoundError(Exception):
     pass
 
 
+class BuildNotRecordedError(Exception):
+    """A CI webhook's cutover could not be committed after CAPP accepted it.
+
+    CAPP is ahead of the row (logged); the build stays `building` under its
+    lock, so the webhook is safe to redeliver. 503 + Retry-After: CI retries.
+    """
+
+
 class AutomationBusyError(Exception):
     """The automation row stayed locked past DB_LOCK_TIMEOUT_MS.
 

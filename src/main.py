@@ -26,6 +26,7 @@ from src.exceptions import (
     AutomationLifecycleConflictError,
     AutomationNotFoundError,
     AutomationValidationError,
+    BuildNotRecordedError,
     CappUnavailableError,
     LifecycleAuthenticationNotConfiguredError,
     ScriptRepoUnavailableError,
@@ -179,6 +180,18 @@ def get_app() -> FastAPI:
                 ),
                 "matching_state": exc.matching_state,
             },
+        )
+
+    @app.exception_handler(BuildNotRecordedError)
+    async def build_not_recorded_handler(
+        request: Request, exc: BuildNotRecordedError
+    ) -> JSONResponse:
+        # CAPP accepted the image but the DB write failed: the build is still
+        # `building`, so a redelivery completes it. Cause text never echoed.
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            headers={"Retry-After": "1"},
+            content={"detail": "Build result could not be recorded; retry shortly"},
         )
 
     @app.exception_handler(AutomationBusyError)

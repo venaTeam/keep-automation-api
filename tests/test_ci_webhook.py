@@ -11,6 +11,7 @@ from uuid import uuid4
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import event, text
+from sqlalchemy.exc import OperationalError
 
 from src import config
 from src.api import deps
@@ -66,6 +67,19 @@ class RecordingEvents:
 
     def publish(self, event: dict) -> None:
         self.events.append(event)
+
+
+class RecordingDeletion:
+    """The cascade's CAPP deletion interface; absent = 404 = success."""
+
+    def __init__(self):
+        self.calls: list[tuple] = []
+
+    def delete_capp(self, wallet: str, name: str) -> None:
+        self.calls.append(("delete_capp", wallet, name))
+
+    def delete_secret(self, wallet: str, name: str) -> None:
+        self.calls.append(("delete_secret", wallet, name))
 
 
 class Harness:
@@ -822,35 +836,34 @@ def test_commit_rechecks_admission_under_a_row_lock(harness, test_engine, outcom
 
 
 def test_unstored_create_then_wallet_edit_redeploys_in_the_new_wallet(harness, test_engine):
-    # Drift path: the lock is released (E21, to `idle`) while CAPP creates the
-    # deployment, so its id is never stored; the author then moves the wallet
-    # — allowed, the row has no deployment — and the next build must not land
-    # on the old-wallet deployment. (A same-commit `failed` in that window is
-    # reconciled instead — see the test above.)
+    # Drift path, as it really happens: while CAPP creates the first
+    # deployment, a same-commit `failed` lands and the author edits — moving
+    # the wallet, allowed since the row has no deployment yet. The success then
+    # loses to the newer edit (sha_mismatch), so the deployment's id is never
+    # stored. The edit's own build must not land on the old-wallet deployment.
     created = harness.create()
     sha = row(test_engine, created["id"])["building_sha"]
 
-    def release_lock():
-        with test_engine.begin() as conn:
-            conn.execute(
-                text(
-                    "UPDATE automations SET build_state = 'idle', "
-                    "building_sha = NULL, build_lock_deadline = NULL WHERE id = :id"
-                ),
-                {"id": created["id"]},
-            )
+    def fail_then_move_wallet():
+        builds.apply_build_result(
+            CiWebhookIn(**failed(created["id"], sha)),
+            InMemoryCappClient(),
+            RecordingReload(),
+            RecordingEvents(),
+        )
+        harness.edit(created["id"], namespace="other-wallet")
 
-    probe = _ProbingCapp(test_engine, release_lock)
-    harness.client.app.dependency_overrides[get_capp_client] = lambda: probe
-    assert harness.webhook(success(created["id"], sha)).json() == {
-        "status": "ignored",
-        "reason": "not_building",
-    }
+    probe = _ProbingCapp(test_engine, fail_then_move_wallet)
+    result = builds.apply_build_result(
+        CiWebhookIn(**success(created["id"], sha)), probe, RecordingReload(), RecordingEvents()
+    )
+    assert (result.status, result.reason) == ("ignored", "sha_mismatch")
     assert row(test_engine, created["id"])["capp_deployment_id"] is None
+    assert probe.wallets[created["id"]] == "payments-wallet"
     old_deployment = probe.deployments[created["id"]].deployment_id
 
     probe.during_call = None
-    harness.edit(created["id"], namespace="other-wallet")
+    harness.client.app.dependency_overrides[get_capp_client] = lambda: probe
     sha = row(test_engine, created["id"])["building_sha"]
     calls_before = len(probe.calls)
     assert harness.webhook(success(created["id"], sha)).json() == {"status": "applied"}
@@ -1086,16 +1099,103 @@ def test_deletion_started_during_capp_call_is_not_cut_over(harness, test_engine,
     events = RecordingEvents()
     reload = RecordingReload()
     capp = _ProbingCapp(test_engine, start_deletion)
+    deletion = RecordingDeletion()
     with caplog.at_level(logging.WARNING):
-        result = builds.apply_build_result(_event(created["id"], sha), capp, reload, events)
+        result = builds.apply_build_result(
+            _event(created["id"], sha), capp, reload, events, deletion
+        )
 
     assert (result.status, result.reason) == ("ignored", "deleting")
     automation = row(test_engine, created["id"])
     assert automation["active_digest"] is None
     assert automation["capp_deployment_id"] is None
     assert events.events == [] and reload.count == 0
-    # CAPP is now ahead of the row: the deployment exists, keyed by
-    # automation_id, and the drift is logged for whoever reconciles it.
-    assert str(created["id"]) in capp.deployments
     assert "CAPP ahead of row" in caplog.text
     assert "reason=deleting" in caplog.text
+    # The cascade's CAPP step may already have found nothing (404) and never
+    # runs again, so the create is undone here — the same two deletions, in
+    # the wallet it was created in.
+    assert deletion.calls == [
+        ("delete_capp", "payments-wallet", f"automation-{created['id']}"),
+        ("delete_secret", "payments-wallet", f"automation-{created['id']}-run-auth"),
+    ]
+
+
+def test_teardown_failure_is_logged_and_still_ignored(harness, test_engine, caplog):
+    created = harness.create()
+    sha = row(test_engine, created["id"])["building_sha"]
+
+    def start_deletion():
+        with test_engine.begin() as conn:
+            conn.execute(
+                text("UPDATE automations SET matching_state = 'deleting' WHERE id = :id"),
+                {"id": created["id"]},
+            )
+
+    with caplog.at_level(logging.WARNING):
+        # The production default deletion client is unconfigured until D16.
+        result = builds.apply_build_result(
+            _event(created["id"], sha),
+            _ProbingCapp(test_engine, start_deletion),
+            RecordingReload(),
+            RecordingEvents(),
+        )
+
+    assert (result.status, result.reason) == ("ignored", "deleting")
+    assert "could not tear down" in caplog.text
+    assert "ExternalDependencyNotConfiguredError" in caplog.text
+
+
+def test_rollout_losing_to_deletion_tears_nothing_down(harness, test_engine):
+    # The deployment's id is stored, so the cascade owns its removal.
+    automation_id = _built(harness, test_engine)
+    harness.edit(automation_id)
+    sha = row(test_engine, automation_id)["building_sha"]
+
+    def start_deletion():
+        with test_engine.begin() as conn:
+            conn.execute(
+                text("UPDATE automations SET matching_state = 'deleting' WHERE id = :id"),
+                {"id": automation_id},
+            )
+
+    capp = InMemoryCappClient()
+    capp.deployments[automation_id] = harness.capp.deployments[automation_id]
+    capp.wallets[automation_id] = harness.capp.wallets[automation_id]
+    capp.rollout = _with_hook(capp.rollout, start_deletion)
+    deletion = RecordingDeletion()
+    result = builds.apply_build_result(
+        CiWebhookIn(**success(automation_id, sha, 2)),
+        capp,
+        RecordingReload(),
+        RecordingEvents(),
+        deletion,
+    )
+
+    assert result.reason == "deleting"
+    assert deletion.calls == []
+
+
+def test_db_failure_after_capp_accepted_is_a_redeliverable_503(
+    harness, test_engine, monkeypatch, caplog
+):
+    created = harness.create()
+    sha = row(test_engine, created["id"])["building_sha"]
+    real_lock_first = builds.lock_first
+
+    def broken(session, query):
+        raise OperationalError("SELECT ... FOR UPDATE", {}, Exception("connection lost"))
+
+    monkeypatch.setattr(builds, "lock_first", broken)
+    with caplog.at_level(logging.WARNING):
+        resp = harness.webhook(success(created["id"], sha))
+
+    assert resp.status_code == 503
+    assert resp.headers["Retry-After"] == "1"
+    assert "connection lost" not in resp.text
+    assert "could not be recorded (OperationalError)" in caplog.text
+    assert "connection lost" not in caplog.text
+    assert row(test_engine, created["id"])["build_state"] == "building"
+
+    monkeypatch.setattr(builds, "lock_first", real_lock_first)
+    assert harness.webhook(success(created["id"], sha)).json() == {"status": "applied"}

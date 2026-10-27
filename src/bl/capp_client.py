@@ -34,11 +34,15 @@ integration"):
   return it as-is — tear it down and recreate in the requested wallet, or
   raise `CappUnavailableError`.
 - CAPP can end up **ahead of the row**: if the cutover's commit-time admission
-  fails after a successful call (deletion started, or E21 released the lock,
-  mid-call), a rollout keeps serving the new image and a first-build create
-  leaves a deployment whose id was never stored. So anything that tears down
-  or reconciles a deployment (D18's delete cascade, E21) must resolve it by
-  `automation_id` — the deployment key — not only by `capp_deployment_id`.
+  fails after a successful call, a rollout keeps serving the new image and a
+  first-build create leaves a deployment whose id was never stored. A create
+  that loses to a deletion is torn down by the webhook itself (best-effort).
+  What remains — a failed teardown, or a create stranded in an *old* wallet by
+  a raced failure plus a wallet-moving edit — is not reachable by the delete
+  cascade, whose CAPP step runs once and only in the row's current wallet. So
+  D16/D18/E21 must sweep by `automation_id` **across wallets** (or re-run the
+  cascade's CAPP step after any logged drift), not only by
+  `capp_deployment_id`.
 - Every call carries an explicit timeout and raises `CappUnavailableError` on
   any failure, with a message that never includes the identity.
 

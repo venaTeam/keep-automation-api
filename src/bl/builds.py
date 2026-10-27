@@ -48,16 +48,24 @@ from datetime import datetime, timezone
 from uuid import UUID
 
 from sqlalchemy import select, update
+from sqlalchemy.exc import SQLAlchemyError
 
 from src import config
 from src.bl.capp_client import CappClient, CappDeployment
+from src.bl.cascade_adapters import (
+    CappDeletionClient,
+    get_default_capp_deletion_client,
+    run_auth_secret_name,
+)
 from src.contracts.validation_errors import ErrorCode, FieldError
 from src.core.automation_events import AutomationEventPublisher
 from src.core.db import get_session, lock_first
 from src.core.reload import ReloadPublisher
 from src.exceptions import (
+    AutomationBusyError,
     AutomationNotFoundError,
     AutomationValidationError,
+    BuildNotRecordedError,
     CappUnavailableError,
 )
 from src.models.api.ci_webhook import (
@@ -222,7 +230,10 @@ def apply_build_result(
     capp: CappClient,
     reload: ReloadPublisher,
     events: AutomationEventPublisher,
+    deletion: CappDeletionClient | None = None,
 ) -> CiWebhookOut:
+    if deletion is None:
+        deletion = get_default_capp_deletion_client()
     # Phase 1 — admission + snapshot, connection released before any CAPP call.
     with get_session() as session:
         automation = _load(session, event.automation_id)
@@ -275,68 +286,68 @@ def apply_build_result(
         )
         raise
 
-    # Phase 3 — atomic cutover, admission re-checked under the row lock.
-    with get_session() as session:
-        automation = _load(session, event.automation_id, lock=True)
-        reason = _admission(automation, event.commit_sha)
-        if reason == IgnoredReason.NOT_BUILDING and _failure_raced(
-            session, automation, event.commit_sha
-        ):
-            # A `failed` for this same commit landed while CAPP was accepting
-            # the image. CAPP serves it now, so the row follows CAPP.
-            logger.warning(
-                "ci-webhook: failure for automation=%s sha=%s was recorded "
-                "during the CAPP %s; success overrides it",
-                event.automation_id,
-                event.commit_sha,
-                operation,
-            )
-            reason = None
-        if reason is not None:
-            if automation.active_digest != event.image:
-                # Not a duplicate delivery: CAPP accepted the image but the row
-                # moved on mid-call (deletion started, or the lock was
-                # released). CAPP is now ahead of the row — a rollout serves
-                # `event.image`; a first-build create left a deployment whose id
-                # was never stored. Recovery keys on `automation_id`, the
-                # deployment key (see the CappClient contract).
+    # Phase 3 — atomic cutover, admission re-checked under the row lock. CAPP
+    # has accepted the image by now, so a failure to record it leaves CAPP
+    # ahead of the row: logged, and answered 503 so CI redelivers.
+    ignored: IgnoredReason | None = None
+    try:
+        with get_session() as session:
+            automation = _load(session, event.automation_id, lock=True)
+            reason = _admission(automation, event.commit_sha)
+            if reason == IgnoredReason.NOT_BUILDING and _failure_raced(
+                session, automation, event.commit_sha
+            ):
+                # A `failed` for this same commit landed while CAPP was
+                # accepting the image. CAPP serves it now; the row follows.
                 logger.warning(
-                    "ci-webhook CAPP ahead of row: %s accepted image=%s but "
-                    "admission failed at commit (reason=%s automation=%s sha=%s)",
-                    operation,
-                    event.image,
-                    reason.value,
+                    "ci-webhook: failure for automation=%s sha=%s was recorded "
+                    "during the CAPP %s; success overrides it",
                     event.automation_id,
                     event.commit_sha,
+                    operation,
                 )
-            # Otherwise a concurrent delivery of this same webhook cut over.
-            return _ignored(event, reason)
-        if created is not None:
-            automation.capp_deployment_id = created.deployment_id
-            automation.deployment_url = created.deployment_url
-        automation.active_digest = event.image
-        automation.contract_version = event.contract_version
-        automation.build_state = BuildState.IDLE
-        automation.building_sha = None
-        automation.build_lock_deadline = None
-        automation.updated_at = datetime.now(timezone.utc)
-        session.add(automation)
-        # The revision that requested this build learns what it produced.
-        session.execute(
-            update(AutomationRevision)
-            .where(
-                AutomationRevision.automation_id == event.automation_id,
-                AutomationRevision.git_sha == event.commit_sha,
-                AutomationRevision.action.in_(_REQUESTING_ACTIONS),
-            )
-            .values(resulting_digest=event.image)
+                reason = None
+            if reason is not None:
+                if automation.active_digest != event.image:
+                    # Not a duplicate delivery: CAPP accepted the image but the
+                    # row moved on mid-call (deletion started, or the lock was
+                    # released). CAPP is now ahead of the row — a rollout
+                    # serves `event.image`; a first-build create left a
+                    # deployment whose id was never stored.
+                    logger.warning(
+                        "ci-webhook CAPP ahead of row: %s accepted image=%s but "
+                        "admission failed at commit (reason=%s automation=%s "
+                        "sha=%s)",
+                        operation,
+                        event.image,
+                        reason.value,
+                        event.automation_id,
+                        event.commit_sha,
+                    )
+                # Otherwise a concurrent delivery of this same webhook cut over.
+                ignored = reason
+            else:
+                build_event = _cut_over(session, automation, event, created)
+    except (AutomationBusyError, SQLAlchemyError) as exc:
+        logger.warning(
+            "ci-webhook CAPP ahead of row: %s accepted image=%s but the cutover "
+            "could not be recorded (%s): automation=%s sha=%s; CI must redeliver",
+            operation,
+            event.image,
+            type(exc).__name__,
+            event.automation_id,
+            event.commit_sha,
         )
-        session.add(
-            _build_revision(event, RevisionAction.BUILD_SUCCEEDED, event.image)
-        )
-        session.commit()
-        session.refresh(automation)
-        build_event = _build_event(automation, event.commit_sha)
+        if isinstance(exc, AutomationBusyError):
+            raise
+        raise BuildNotRecordedError() from exc
+
+    if ignored is not None:
+        if ignored == IgnoredReason.DELETING and created is not None:
+            # The cascade may already have run its CAPP step (a 404 then —
+            # nothing existed yet), and never runs it again: undo our create.
+            _tear_down(event, target.wallet, created, deletion)
+        return _ignored(event, ignored)
 
     logger.info(
         "ci-webhook cutover: automation=%s sha=%s image=%s first_deploy=%s",
@@ -349,6 +360,65 @@ def apply_build_result(
     reload.publish_reload()
     events.publish(build_event)
     return CiWebhookOut(status=CiWebhookResult.APPLIED)
+
+
+def _cut_over(
+    session, automation: Automation, event: CiWebhookIn, created: CappDeployment | None
+) -> dict:
+    """Write the cutover + its audit row and commit; the build event to publish."""
+    if created is not None:
+        automation.capp_deployment_id = created.deployment_id
+        automation.deployment_url = created.deployment_url
+    automation.active_digest = event.image
+    automation.contract_version = event.contract_version
+    automation.build_state = BuildState.IDLE
+    automation.building_sha = None
+    automation.build_lock_deadline = None
+    automation.updated_at = datetime.now(timezone.utc)
+    session.add(automation)
+    # The revision that requested this build learns what it produced.
+    session.execute(
+        update(AutomationRevision)
+        .where(
+            AutomationRevision.automation_id == event.automation_id,
+            AutomationRevision.git_sha == event.commit_sha,
+            AutomationRevision.action.in_(_REQUESTING_ACTIONS),
+        )
+        .values(resulting_digest=event.image)
+    )
+    session.add(_build_revision(event, RevisionAction.BUILD_SUCCEEDED, event.image))
+    session.commit()
+    session.refresh(automation)
+    return _build_event(automation, event.commit_sha)
+
+
+def _tear_down(
+    event: CiWebhookIn,
+    wallet: str,
+    created: CappDeployment,
+    deletion: CappDeletionClient,
+) -> None:
+    """Best-effort removal of a deployment created for an automation that
+    started deleting mid-call — the same two deletions as the cascade's CAPP
+    step (Capp, then the Keep-owned run-auth Secret), in the wallet we created
+    it in. A failure leaves it orphaned for the cascade/E21 to sweep."""
+    try:
+        deletion.delete_capp(wallet, created.deployment_id)
+        deletion.delete_secret(wallet, run_auth_secret_name(event.automation_id))
+    except Exception as exc:  # noqa: BLE001 — best-effort, the answer stays `ignored`
+        logger.warning(
+            "ci-webhook: could not tear down the deployment created for "
+            "deleting automation=%s in wallet %s (%s); it is orphaned until "
+            "swept by automation_id",
+            event.automation_id,
+            wallet,
+            type(exc).__name__,
+        )
+        return
+    logger.info(
+        "ci-webhook: tore down the deployment created for deleting automation=%s",
+        event.automation_id,
+    )
 
 
 def _record_failure(
