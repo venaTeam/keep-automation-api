@@ -3,7 +3,6 @@
 Skeleton (D12): only what the app shell needs. Concrete values (tokens, DB DSN,
 CAPP identity) are provisioned by A0 and consumed by later stories.
 """
-import json
 import os
 from collections.abc import Mapping
 
@@ -170,7 +169,7 @@ def load_capp_client_settings(environ: Mapping[str, str] | None = None) -> dict:
             username=env["CAPP_USERNAME"],
             password=env["CAPP_PASSWORD"],
             timeout_seconds=float(env.get("CAPP_REQUEST_TIMEOUT_SECONDS", "30")),
-            wallets=json.loads(env.get("CAPP_ONBOARDED_WALLETS", "{}")),
+            cluster=env["CAPP_CLUSTER"],
         )
     except (KeyError, ValueError, TypeError):
         pass

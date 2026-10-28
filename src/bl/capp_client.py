@@ -1,4 +1,4 @@
-"""Async CAPP resource operations with server-controlled wallet validation.
+"""Async CAPP resource operations for caller-supplied wallet targets.
 
 Await calls after releasing DB sessions. Authentication and HTTP live in
 CappTransport; response validation lives in capp_responses.
@@ -6,7 +6,7 @@ CappTransport; response validation lives in capp_responses.
 
 import copy
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from datetime import datetime
 from http import HTTPMethod
 from typing import Any, TypeAlias
@@ -76,15 +76,12 @@ class CappClient:
         base_url: str,
         username: str,
         password: str,
-        wallets: Mapping[str, str],
+        cluster: str,
         timeout_seconds: float = 30,
         transport: httpx.AsyncBaseTransport | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
-        if not isinstance(wallets, Mapping):
-            raise CappError(CappErrorCode.CONFIGURATION)
-        # Snapshot the onboarded wallet-to-cluster mapping, never caller input.
-        self._wallets = {_segment(w): _segment(c) for w, c in wallets.items()}
+        self._cluster = _segment(cluster)
         self._transport = CappTransport(
             base_url=base_url,
             username=username,
@@ -95,14 +92,11 @@ class CappClient:
         )
 
     def _target(self, target: WalletTarget) -> CappWalletTarget:
-        wallet = target.wallet_name if isinstance(target, CappWalletTarget) else target
-        _segment(wallet)
-        cluster = self._wallets.get(wallet)
-        if not cluster or (
-            isinstance(target, CappWalletTarget) and target.cluster != cluster
-        ):
-            raise CappError(CappErrorCode.INVALID_TARGET)
-        return CappWalletTarget(cluster, wallet)
+        if isinstance(target, CappWalletTarget):
+            return CappWalletTarget(
+                _segment(target.cluster), _segment(target.wallet_name)
+            )
+        return CappWalletTarget(self._cluster, _segment(target))
 
     def _path(self, target: WalletTarget, kind: str, name: str | None = None) -> str:
         target = self._target(target)

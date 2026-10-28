@@ -123,7 +123,7 @@ def client(replies):
         base_url="https://capp.example",
         username=IDENTITY[0],
         password=IDENTITY[1],
-        wallets={"team": "dev"},
+        cluster="dev",
         timeout_seconds=7,
         transport=httpx.MockTransport(wire),
         clock=lambda: NOW,
@@ -451,16 +451,16 @@ async def test_success_body_cannot_reflect_identity_to_callers(credential):
 @pytest.mark.parametrize(
     "target",
     [
-        "unknown",
         "../team",
         "team/a",
         "team%2fa",
         "team\n",
         "",
-        CappWalletTarget("other", "team"),
+        CappWalletTarget("../other", "team"),
+        CappWalletTarget("dev", "../team"),
     ],
 )
-async def test_untrusted_targets_fail_before_authentication(target):
+async def test_malformed_targets_fail_before_authentication(target):
     adapter, wire = client([])
     with pytest.raises(CappError, match="invalid_target"):
         (await adapter.get_capp(target, NAME))
@@ -521,7 +521,7 @@ async def test_malformed_resource(body):
         {"timeout_seconds": float("nan")},
         {"timeout_seconds": 0},
         {"password": ""},
-        {"wallets": []},
+        {"cluster": "../dev"},
     ],
 )
 async def test_invalid_configuration(changes):
@@ -532,7 +532,7 @@ async def test_invalid_configuration(changes):
                     base_url="https://capp.example",
                     username="user",
                     password="password",
-                    wallets={},
+                    cluster="dev",
                 ),
                 **changes,
             }
@@ -546,9 +546,9 @@ async def test_environment_settings_and_safe_failures():
         CAPP_BASE_URL="https://capp.example",
         CAPP_USERNAME=IDENTITY[0],
         CAPP_PASSWORD=IDENTITY[1],
-        CAPP_ONBOARDED_WALLETS='{"team":"dev"}',
+        CAPP_CLUSTER="dev",
     )
-    assert load_capp_client_settings(env)["wallets"] == {"team": "dev"}
+    assert load_capp_client_settings(env)["cluster"] == "dev"
     env["CAPP_REQUEST_TIMEOUT_SECONDS"] = IDENTITY[1]
     with pytest.raises(CappError) as caught:
         load_capp_client_settings(env)
@@ -568,7 +568,7 @@ async def test_no_redirects():
         base_url="https://capp.example",
         username=IDENTITY[0],
         password=IDENTITY[1],
-        wallets={"team": "dev"},
+        cluster="dev",
         transport=httpx.MockTransport(handler),
     ) as adapter:
         with pytest.raises(CappError):
@@ -593,7 +593,7 @@ async def test_default_d18_client_uses_server_configuration(monkeypatch):
     monkeypatch.setenv("CAPP_BASE_URL", "https://capp.example")
     monkeypatch.setenv("CAPP_USERNAME", IDENTITY[0])
     monkeypatch.setenv("CAPP_PASSWORD", IDENTITY[1])
-    monkeypatch.setenv("CAPP_ONBOARDED_WALLETS", '{"team":"dev"}')
+    monkeypatch.setenv("CAPP_CLUSTER", "dev")
     app = FastAPI()
     request = Request({"type": "http", "app": app})
     adapter = await get_capp_deletion_client(request)
@@ -601,7 +601,7 @@ async def test_default_d18_client_uses_server_configuration(monkeypatch):
     assert adapter is await get_capp_deletion_client(request)
     try:
         with pytest.raises(CappError, match="invalid_target"):
-            await adapter.delete_capp("unregistered", NAME)
+            await adapter.delete_capp("../invalid", NAME)
     finally:
         await adapter.aclose()
 
@@ -668,7 +668,7 @@ async def test_invalid_port_is_rejected_before_network():
             base_url="https://capp.example:invalid",
             username=IDENTITY[0],
             password=IDENTITY[1],
-            wallets={},
+            cluster="dev",
         )
     assert caught.value.code is CappErrorCode.CONFIGURATION
     assert caught.value.__context__ is None
@@ -698,7 +698,7 @@ async def test_slow_requests_overlap_and_login_happens_once():
         base_url="https://capp.example",
         username=IDENTITY[0],
         password=IDENTITY[1],
-        wallets={"team": "dev"},
+        cluster="dev",
         transport=httpx.MockTransport(handler),
         clock=lambda: NOW,
     ) as adapter:
@@ -734,7 +734,7 @@ async def test_concurrent_401_responses_share_one_refresh():
         base_url="https://capp.example",
         username=IDENTITY[0],
         password=IDENTITY[1],
-        wallets={"team": "dev"},
+        cluster="dev",
         transport=httpx.MockTransport(handler),
         clock=lambda: NOW,
     ) as adapter:
@@ -769,7 +769,7 @@ async def test_total_deadline_bounds_slow_stream_and_closes_response():
         base_url="https://capp.example",
         username=IDENTITY[0],
         password=IDENTITY[1],
-        wallets={"team": "dev"},
+        cluster="dev",
         timeout_seconds=0.05,
         transport=httpx.MockTransport(handler),
         clock=lambda: NOW,
@@ -797,7 +797,7 @@ async def test_cancelled_login_releases_auth_lock():
         base_url="https://capp.example",
         username=IDENTITY[0],
         password=IDENTITY[1],
-        wallets={"team": "dev"},
+        cluster="dev",
         transport=httpx.MockTransport(handler),
         clock=lambda: NOW,
     ) as adapter:
@@ -825,7 +825,7 @@ async def test_app_lifespan_closes_its_client_and_does_not_share_across_apps(
         "CAPP_BASE_URL": "https://capp.example",
         "CAPP_USERNAME": IDENTITY[0],
         "CAPP_PASSWORD": IDENTITY[1],
-        "CAPP_ONBOARDED_WALLETS": '{"team":"dev"}',
+        "CAPP_CLUSTER": "dev",
     }.items():
         monkeypatch.setenv(name, value)
     first_app, second_app = FastAPI(), FastAPI()
@@ -843,3 +843,25 @@ async def test_app_lifespan_closes_its_client_and_does_not_share_across_apps(
         )
     assert first._transport._http.is_closed and second._transport._http.is_closed
     assert not hasattr(first_app.state, "capp_client")
+
+
+@pytest.mark.parametrize(
+    "target,cluster",
+    [
+        ("new-wallet", "dev"),
+        (CappWalletTarget("other-cluster", "new-wallet"), "other-cluster"),
+    ],
+)
+async def test_caller_supplies_wallet_without_onboarding_allowlist(target, cluster):
+    adapter, wire = client(
+        [
+            (HTTPStatus.OK, tokens()),
+            (HTTPStatus.OK, capp(namespace="new-wallet")),
+        ]
+    )
+    resource = await adapter.get_capp(target, NAME)
+    assert resource.uid == "capp-uid"
+    assert (
+        wire.calls[-1][1]
+        == f"{ROOT}/clusters/{cluster}/namespaces/new-wallet/capps/{NAME}"
+    )

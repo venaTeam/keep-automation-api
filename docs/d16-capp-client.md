@@ -8,7 +8,7 @@ or invokes `/run`.
 
 ## Module responsibilities
 
-- `capp_client.py` validates approved wallet targets and builds resource requests.
+- `capp_client.py` checks target URL syntax and builds resource requests.
 - `capp_transport.py` owns the HTTP pool, authentication, token refresh, deadlines,
   status handling, and rejection of responses that echo identity material.
 - `capp_responses.py` validates responses and produces typed resource results.
@@ -28,16 +28,13 @@ secret store. Never send them from an authoring request or log configuration.
 | `CAPP_USERNAME` | Required OpenShift service identity username |
 | `CAPP_PASSWORD` | Required OpenShift service identity password |
 | `CAPP_REQUEST_TIMEOUT_SECONDS` | Positive finite timeout for every HTTP call; default 30 |
-| `CAPP_ONBOARDED_WALLETS` | Operator-managed JSON mapping of verified wallet names to clusters; default `{}` rejects all wallets |
+| `CAPP_CLUSTER` | Required default cluster for calls that supply a wallet name |
 
-Example non-secret mapping: `{"payments":"dev-cluster"}`. F25's persisted
-wallet registry does not exist on this branch's dev base. Until it lands, this
-mapping is the trusted registry, configured only after out-of-band verification.
-Restart workers after registry or credential changes. Retain mappings during
-deboarding until all deletion cascades finish. Passing a `CappWalletTarget`
-does not bypass the mapping: both its namespace and cluster must match.
-This adapter's allowlist protects CAPP calls; authoring dropdown/onboarding
-validation remains F25's responsibility.
+Wallet onboarding and tenant authorization belong to the calling business layer,
+outside D16. The client has no wallet registry or allowlist. A wallet name uses
+`CAPP_CLUSTER`; a `CappWalletTarget(cluster, wallet_name)` supplies both explicitly.
+Both path segments are checked for valid URL syntax only. Changing the configured
+default cluster or credentials requires restarting workers.
 
 ## Callers
 
@@ -142,7 +139,7 @@ backend outages and nonstandard proxy server-error statuses.
 `poetry run pytest tests/test_capp_client.py -q` runs mocked wire tests without
 Docker. They cover every method/path, timeout propagation, auth refresh and
 concurrency, 401 recovery, safe errors, replacement, conflict, ownership and
-wallet validation, result mapping, and D18 dependency compatibility.
+target syntax checks, caller-supplied routing, result mapping, and D18 dependency compatibility.
 Async tests also verify overlapping requests, concurrent 401 recovery, cancellation,
 stream cleanup, total deadlines, and per-app pool lifecycle. Run
 `tests/test_cascade_async.py` for worker-thread and checkpoint guarantees without
