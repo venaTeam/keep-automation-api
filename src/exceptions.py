@@ -37,9 +37,10 @@ class RunNotFoundError(Exception):
 class BuildNotRecordedError(Exception):
     """A CI webhook's cutover could not be committed after CAPP accepted it.
 
-    CAPP is ahead of the row (logged); nothing was written — the row stays
-    `building` (or `build_failed` for a raced failure, which success admission
-    accepts), so the webhook is safe to redeliver. 503 + Retry-After.
+    CAPP is ahead of the row (logged) and nothing was written. Normally the
+    row is still `building`, so a redelivery completes it (503 + Retry-After).
+    After a raced `failed` it is `build_failed` and a redelivery is `ignored`:
+    the drift stays for E21 to reconcile.
     """
 
 
@@ -75,7 +76,7 @@ class ScriptRepoUnavailableError(Exception):
 class CappUnavailableError(Exception):
     """A CAPP control-API call (deploy / rollout) failed, timed out, or no CAPP
     client is configured yet (D16). Mapped to a 503: the build cutover was not
-    applied — the row is still `building` under its lock and the live
-    deployment keeps serving the old digest (spec §6.3), so a webhook replay or
-    the reconciler can retry it. The message must never carry the CAPP
+    applied and nothing was written — the row is as the call found it
+    (normally `building` under its lock) and the live deployment keeps serving
+    the old digest (spec §6.3), so a webhook replay or the reconciler can retry. The message must never carry the CAPP
     identity (spec §3.4)."""

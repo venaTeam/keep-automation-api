@@ -25,7 +25,10 @@ integration"):
   find it again, not orphan it.
 - `rollout` leaves the previous revision serving when it fails (spec §5.1).
   It carries the image **and the current `secret_refs`** — an edit may change
-  the secret, and the deployment must mount what the row names.
+  the secret, and the deployment must mount what the row names. A rollout of a
+  deployment that no longer exists must **fail**, never recreate it: the
+  delete cascade's CAPP step runs once, so an upsert landing after it would
+  leave a live deployment nothing tears down.
 - The **wallet is fixed at create**: authoring refuses a wallet change once
   `capp_deployment_id` is set (`namespace_immutable`), so rollout never needs
   one. If `create_deployment` finds an existing deployment for the id in a

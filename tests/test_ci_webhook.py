@@ -1145,12 +1145,14 @@ def test_raced_failure_still_reconciles_after_a_toggle_revision(harness, test_en
     assert row(test_engine, created["id"])["active_digest"] == image(created["id"])
 
 
-def test_redelivery_after_a_raced_failure_and_a_503_completes_the_cutover(
-    harness, test_engine, monkeypatch
+def test_redelivery_after_a_raced_failure_and_a_503_is_ignored_and_logged(
+    harness, test_engine, monkeypatch, caplog
 ):
-    # A raced failure leaves the row `build_failed`; the cutover then fails to
-    # be recorded (503, "redeliver"). The redelivery must finish it, not stop
-    # at the first admission check on `not_building`.
+    # Double fault: a raced failure leaves the row `build_failed`, then the
+    # cutover fails to be written (503). The redelivery is `ignored` — a
+    # `build_failed` row is never re-opened by a later success (that would let
+    # a token holder deploy an older digest). CAPP stays ahead of the row, the
+    # first attempt logged it, and reconciling it is E21's.
     created = harness.create()
     sha = row(test_engine, created["id"])["building_sha"]
     real_lock_first = builds.lock_first
@@ -1164,16 +1166,22 @@ def test_redelivery_after_a_raced_failure_and_a_503_completes_the_cutover(
 
     capp = _ProbingCapp(test_engine, fail_then_break_the_db)
     harness.client.app.dependency_overrides[get_capp_client] = lambda: capp
-    assert harness.webhook(success(created["id"], sha)).status_code == 503
+    with caplog.at_level(logging.WARNING):
+        assert harness.webhook(success(created["id"], sha)).status_code == 503
+    assert "CAPP ahead of row" in caplog.text
     assert row(test_engine, created["id"])["build_state"] == "build_failed"
 
     monkeypatch.setattr(builds, "lock_first", real_lock_first)
     capp.during_call = None
-    assert harness.webhook(success(created["id"], sha)).json() == {"status": "applied"}
+    calls = list(capp.calls)
+    assert harness.webhook(success(created["id"], sha)).json() == {
+        "status": "ignored",
+        "reason": "not_building",
+    }
+    assert capp.calls == calls
     automation = row(test_engine, created["id"])
-    assert automation["build_state"] == "idle"
-    assert automation["active_digest"] == image(created["id"])
-    assert automation["capp_deployment_id"] == f"automation-{created['id']}"
+    assert automation["build_state"] == "build_failed"
+    assert automation["active_digest"] is None
 
 
 def test_teardown_uses_the_wallet_the_deployment_was_created_in(harness, test_engine):
@@ -1245,6 +1253,54 @@ def test_a_failure_report_after_its_commit_still_publishes_its_event(
     assert harness.events.events[-1]["build_state"] == "build_failed"
 
 
+def test_a_late_success_never_reopens_an_honestly_failed_build(harness, test_engine):
+    # The image is bound to the automation's repository, not to the commit:
+    # admitting a later "success" for a `build_failed` row would let any token
+    # holder cut a live automation back to an older digest of its own.
+    automation_id = _built(harness, test_engine)
+    harness.edit(automation_id)
+    sha = row(test_engine, automation_id)["building_sha"]
+    assert harness.webhook(failed(automation_id, sha)).json() == {"status": "applied"}
+    calls = list(harness.capp.calls)
+
+    resp = harness.webhook(success(automation_id, sha, 1))  # an older digest
+
+    assert resp.json() == {"status": "ignored", "reason": "not_building"}
+    assert harness.capp.calls == calls
+    automation = row(test_engine, automation_id)
+    assert automation["build_state"] == "build_failed"
+    assert automation["active_digest"] == image(automation_id)
+
+
+@pytest.mark.parametrize("outcome", ["success", "failed"])
+def test_nothing_reads_the_db_after_the_outcome_commits(harness, test_engine, outcome):
+    # Once the outcome commits, a DB error must not be able to turn it into
+    # "not recorded" (503 + false drift log) or a 500: no SQL after the commit.
+    created = harness.create()
+    sha = row(test_engine, created["id"])["building_sha"]
+    payload = success(created["id"], sha) if outcome == "success" else failed(created["id"], sha)
+    trace: list[str] = []
+
+    def on_sql(conn, cursor, statement, *args):
+        trace.append("sql")
+
+    def on_commit(conn):
+        trace.append("commit")
+
+    event.listen(test_engine, "before_cursor_execute", on_sql)
+    event.listen(test_engine, "commit", on_commit)
+    try:
+        result = builds.apply_build_result(
+            CiWebhookIn(**payload), InMemoryCappClient(), RecordingReload(), RecordingEvents()
+        )
+    finally:
+        event.remove(test_engine, "before_cursor_execute", on_sql)
+        event.remove(test_engine, "commit", on_commit)
+
+    assert result.status == "applied"
+    assert trace[-1] == "commit"
+
+
 def _with_hook(call, hook):
     def wrapped(**kwargs):
         hook()
@@ -1314,8 +1370,7 @@ def test_teardown_failure_is_logged_and_still_ignored(harness, test_engine, capl
     assert "ExternalDependencyNotConfiguredError" in caplog.text
 
 
-def test_rollout_losing_to_deletion_tears_nothing_down(harness, test_engine):
-    # The deployment's id is stored, so the cascade owns its removal.
+def test_rollout_losing_to_deletion_tears_it_down(harness, test_engine):
     automation_id = _built(harness, test_engine)
     harness.edit(automation_id)
     sha = row(test_engine, automation_id)["building_sha"]
@@ -1341,7 +1396,12 @@ def test_rollout_losing_to_deletion_tears_nothing_down(harness, test_engine):
     )
 
     assert result.reason == "deleting"
-    assert deletion.calls == []
+    # The cascade may already have deleted it before this rollout landed (and
+    # never runs its CAPP step again), so the stored deployment goes too.
+    assert deletion.calls == [
+        ("delete_capp", "payments-wallet", f"automation-{automation_id}"),
+        ("delete_secret", "payments-wallet", f"automation-{automation_id}-run-auth"),
+    ]
 
 
 def test_db_failure_after_capp_accepted_is_a_redeliverable_503(

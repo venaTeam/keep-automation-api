@@ -9,32 +9,35 @@ applied build, a late webhook for a SHA a newer edit superseded, a build that
 finished after the reconciler released its lock — is answered `ignored` and
 changes nothing, CAPP included. That is the whole of "idempotent per
 (automation, SHA)": the first delivery clears `building_sha`, so every later
-one fails admission. The one exception is a success for a commit whose row a
-raced `failed` left `build_failed` (`_failure_raced`): admitted in both
-admission checks, so a 503'd cutover still finishes on redelivery.
+one fails admission. A `build_failed` row is never re-opened by a later
+success: the image is bound to the automation's repository but not to the
+commit, so that would let a token holder roll a live automation back.
 
 **Success.** CAPP first, then the row. The deployment is created (first build)
 or rolled out (later builds) with **no DB connection held** — a hung CAPP call
 must not pin the small shared pool (ADR-008; same shape as authoring's git
 call). Only once CAPP has accepted the image does a short transaction advance
 `active_digest`, so the digest we record is always the one being served. A
-CAPP failure raises `CappUnavailableError` (→ 503) with the row untouched: still
-`building`, lock held, old digest live (spec §6.3) — a replay or the reconciler
-retries. The commit re-checks admission under `FOR UPDATE`, so two racing
+CAPP failure raises `CappUnavailableError` (→ 503) and writes nothing: the row
+is as the call found it (normally `building`, lock held), old digest live (spec
+§6.3) — a replay or the reconciler retries. The commit re-checks admission under `FOR UPDATE`, so two racing
 deliveries of one webhook cut over once (both CAPP calls are idempotent). A
 `failed` for the same commit that lands during the CAPP call does not strand
 CAPP ahead of the row: the re-check finds `build_failed` for this commit and
-the success still cuts over (`_failure_raced`) — CAPP already serves it.
+the success still cuts over (`_failure_raced`) — CAPP already serves it. That
+override exists only at the commit-time re-check, i.e. for a success that was
+admitted while the row was `building`. If that cutover then fails to be
+written (503), a redelivery is `ignored` (`not_building`): CAPP stays ahead of
+the row, logged, and reconciling it is E21's.
 
 **Failure.** `build_state=build_failed`, lock released, `active_digest` and the
 deployment untouched: a first build has nothing to serve; an edit keeps serving
 the previous digest (spec §5.1). PUT is allowed again, so the author retries
 with a fresh edit. A failure report is bound only by `building_sha`, not by an
 image: any holder of the shared webhook token who knows an automation's id and
-building SHA can fail its build. No image reaches CAPP this way, and the
-honest success for that commit — mid-cutover or arriving later, as long as no
-newer edit came first — still cuts over; the worst case is a build reported
-failed until it does. Closing it needs per-pipeline tokens (open question).
+building SHA can fail its build. No image reaches CAPP this way, and a success
+already mid-cutover still wins; otherwise the worst case is a forced re-edit.
+Closing it needs per-pipeline tokens (open question).
 
 The matching axis is never touched here: a first build lands `inactive`
 ("ready to enable", D18 enables); an edit of an active automation simply
@@ -131,6 +134,11 @@ def _failure_raced(session, automation: Automation, commit_sha: str) -> bool:
     the latest create/edit revision. Any newer edit has claimed the row
     (`building`, not `build_failed`) or written a newer revision, so it is
     never overridden. Only reached after CAPP accepted this commit's image.
+
+    Consulted **only** at the commit-time re-check, for a success admitted
+    while the row was `building`. Never use it to admit a delivery: the image
+    is bound to the automation's repository, not the commit, so re-opening a
+    `build_failed` row would let any token holder deploy an older digest.
     """
     if automation.build_state != BuildState.BUILD_FAILED:
         return False
@@ -240,15 +248,11 @@ def apply_build_result(
     # Phase 1 — admission + snapshot, connection released before any CAPP call.
     with get_session() as session:
         automation = _load(session, event.automation_id)
+        # Strict, for success too: a `build_failed` row is never re-opened here.
+        # The image is bound to the automation's repository, not to the commit,
+        # so admitting a later "success" would let any token holder roll a
+        # live automation back to an older digest (see `_failure_raced`).
         reason = _admission(automation, event.commit_sha)
-        if (
-            event.status == BuildOutcome.SUCCESS
-            and reason == IgnoredReason.NOT_BUILDING
-            and _failure_raced(session, automation, event.commit_sha)
-        ):
-            # A raced failure is on the row and nothing newer: the redelivery
-            # of a success that was answered 503 must be able to finish.
-            reason = None
         if reason is not None:
             return _ignored(event, reason)
         target = _BuildTarget(
@@ -355,10 +359,12 @@ def apply_build_result(
         raise BuildNotRecordedError() from exc
 
     if ignored is not None:
-        if ignored == IgnoredReason.DELETING and created is not None:
-            # The cascade may already have run its CAPP step (a 404 then —
-            # nothing existed yet), and never runs it again: undo our create.
-            _tear_down(event, target.wallet, created, deletion)
+        if ignored == IgnoredReason.DELETING:
+            # The cascade may already have run its CAPP step (a 404 for a
+            # create still in flight) and never runs it again; a rollout may
+            # have landed after it. Undo what this call put there.
+            name = created.deployment_id if created else target.capp_deployment_id
+            _tear_down(event, target.wallet, name, deletion)
         return _ignored(event, ignored)
 
     logger.info(
@@ -409,28 +415,29 @@ def _cut_over(
 def _tear_down(
     event: CiWebhookIn,
     wallet: str,
-    created: CappDeployment,
+    name: str,
     deletion: CappDeletionClient,
 ) -> None:
-    """Best-effort removal of a deployment created for an automation that
-    started deleting mid-call — the same two deletions as the cascade's CAPP
-    step (Capp, then the Keep-owned run-auth Secret), in the wallet we created
-    it in. A failure leaves it orphaned for the cascade/E21 to sweep."""
+    """Best-effort removal of the deployment this call created or rolled out,
+    for an automation that started deleting mid-call — the same two deletions
+    as the cascade's CAPP step (Capp, then the Keep-owned run-auth Secret), in
+    the wallet the call targeted. Both are delete-if-exists, so repeating the
+    cascade's work is harmless. A failure leaves it for the cascade/E21 sweep."""
     try:
-        deletion.delete_capp(wallet, created.deployment_id)
+        deletion.delete_capp(wallet, name)
         deletion.delete_secret(wallet, run_auth_secret_name(event.automation_id))
     except Exception as exc:  # noqa: BLE001 — best-effort, the answer stays `ignored`
         logger.warning(
-            "ci-webhook: could not tear down the deployment created for "
-            "deleting automation=%s in wallet %s (%s); it is orphaned until "
-            "swept by automation_id",
+            "ci-webhook: could not tear down the deployment for deleting "
+            "automation=%s in wallet %s (%s); it is orphaned until swept by "
+            "automation_id",
             event.automation_id,
             wallet,
             type(exc).__name__,
         )
         return
     logger.info(
-        "ci-webhook: tore down the deployment created for deleting automation=%s",
+        "ci-webhook: tore down the deployment for deleting automation=%s",
         event.automation_id,
     )
 
