@@ -37,8 +37,9 @@ class RunNotFoundError(Exception):
 class BuildNotRecordedError(Exception):
     """A CI webhook's cutover could not be committed after CAPP accepted it.
 
-    CAPP is ahead of the row (logged); the build stays `building` under its
-    lock, so the webhook is safe to redeliver. 503 + Retry-After: CI retries.
+    CAPP is ahead of the row (logged); nothing was written — the row stays
+    `building` (or `build_failed` for a raced failure, which success admission
+    accepts), so the webhook is safe to redeliver. 503 + Retry-After.
     """
 
 

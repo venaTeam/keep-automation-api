@@ -1032,6 +1032,8 @@ def test_failure_for_the_same_commit_during_the_capp_call_does_not_strand_capp(
 
     assert result.status == "applied"
     assert "CAPP ahead of row" not in caplog.text
+    # The contract requires the override to be visible in the logs.
+    assert "success overrides the recorded failure" in caplog.text
     automation = row(test_engine, automation_id)
     assert automation["build_state"] == "idle"
     assert automation["active_digest"] == image(automation_id, version)
@@ -1223,6 +1225,24 @@ def test_a_failure_after_the_commit_is_not_reported_as_not_recorded(
     assert resp.json() == {"status": "applied"}
     assert harness.reload.count == 1
     assert harness.events.events[-1]["build_state"] == "idle"
+
+
+def test_a_failure_report_after_its_commit_still_publishes_its_event(
+    harness, test_engine, monkeypatch
+):
+    # Same rule as the cutover: once `build_failed` commits, no re-read may
+    # turn it into a 500 (CI would retry into `ignored` and the SSE nudge is lost).
+    created = harness.create()
+    sha = row(test_engine, created["id"])["building_sha"]
+
+    def refresh_fails(self, *args, **kwargs):
+        raise OperationalError("SELECT", {}, Exception("connection lost"))
+
+    monkeypatch.setattr(Session, "refresh", refresh_fails)
+    resp = harness.webhook(failed(created["id"], sha))
+
+    assert resp.json() == {"status": "applied"}
+    assert harness.events.events[-1]["build_state"] == "build_failed"
 
 
 def _with_hook(call, hook):

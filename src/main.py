@@ -186,8 +186,8 @@ def get_app() -> FastAPI:
     async def build_not_recorded_handler(
         request: Request, exc: BuildNotRecordedError
     ) -> JSONResponse:
-        # CAPP accepted the image but the DB write failed: the build is still
-        # `building`, so a redelivery completes it. Cause text never echoed.
+        # CAPP accepted the image but the DB write failed: nothing was written,
+        # so a redelivery completes it. Cause text never echoed.
         return JSONResponse(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             headers={"Retry-After": "1"},
@@ -250,8 +250,8 @@ def get_app() -> FastAPI:
         request: Request, exc: CappUnavailableError
     ) -> JSONResponse:
         # A CAPP deploy/rollout failed before the cutover committed: the row is
-        # still `building` under its lock and the old digest keeps serving, so
-        # the webhook is safe to redeliver. The exception text is never echoed
+        # unchanged (normally `building` under its lock) and the old digest keeps
+        # serving, so the webhook is safe to redeliver. The exception text is never echoed
         # (it must not, but could, carry CAPP identity detail — spec §3.4).
         return JSONResponse(
             status_code=503,

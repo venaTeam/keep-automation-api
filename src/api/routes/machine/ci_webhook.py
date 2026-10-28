@@ -9,7 +9,7 @@ Responses: `200 {status: applied|ignored, reason?}` — `ignored` is a no-op
 (replay / superseded SHA / deleting), never an error, so CI does not retry it;
 `401` bad token; `400` malformed payload; `404` unknown automation; `503` CAPP
 deploy/rollout failed, or the row was busy / could not be written after CAPP
-accepted — the build stays `building`, safe to redeliver. Any 5xx: redeliver.
+accepted — nothing is written, safe to redeliver. Any 5xx: redeliver.
 """
 from fastapi import APIRouter, Depends, status
 from fastapi.concurrency import run_in_threadpool

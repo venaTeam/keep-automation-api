@@ -31,9 +31,10 @@ deployment untouched: a first build has nothing to serve; an edit keeps serving
 the previous digest (spec §5.1). PUT is allowed again, so the author retries
 with a fresh edit. A failure report is bound only by `building_sha`, not by an
 image: any holder of the shared webhook token who knows an automation's id and
-building SHA can fail its build. The worst case is a forced re-edit (no image
-reaches CAPP this way, and a success already mid-cutover still wins); closing it
-needs per-pipeline tokens (open question).
+building SHA can fail its build. No image reaches CAPP this way, and the
+honest success for that commit — mid-cutover or arriving later, as long as no
+newer edit came first — still cuts over; the worst case is a build reported
+failed until it does. Closing it needs per-pipeline tokens (open question).
 
 The matching axis is never touched here: a first build lands `inactive`
 ("ready to enable", D18 enables); an edit of an active automation simply
@@ -307,11 +308,12 @@ def apply_build_result(
             if reason == IgnoredReason.NOT_BUILDING and _failure_raced(
                 session, automation, event.commit_sha
             ):
-                # A `failed` for this same commit landed while CAPP was
-                # accepting the image. CAPP serves it now; the row follows.
+                # A `failed` for this same commit is on the row (it raced this
+                # delivery, or an earlier one answered 503). CAPP serves the
+                # image now; the row follows.
                 logger.warning(
-                    "ci-webhook: failure for automation=%s sha=%s was recorded "
-                    "during the CAPP %s; success overrides it",
+                    "ci-webhook: success overrides the recorded failure for "
+                    "automation=%s sha=%s (CAPP %s accepted the image)",
                     event.automation_id,
                     event.commit_sha,
                     operation,
@@ -447,9 +449,9 @@ def _record_failure(
         automation.updated_at = datetime.now(timezone.utc)
         session.add(automation)
         session.add(_build_revision(event, RevisionAction.BUILD_FAILED, None))
-        session.commit()
-        session.refresh(automation)
+        # Built before the commit, like the cutover's: no re-read after it.
         build_event = _build_event(automation, event.commit_sha)
+        session.commit()
 
     logger.info(
         "ci-webhook build failed: automation=%s sha=%s",
