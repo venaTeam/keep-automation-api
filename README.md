@@ -5,13 +5,14 @@ Control-plane API for the Keep **Automations** feature — a **dedicated service
 tables, the CI webhook, SSE to the UI, git commits, and CAPP deploy/rollouts, and
 custodies the single CAPP service identity.
 
-> **Status: authoring CRUD + lifecycle orchestration; integration pending.**
-> The FastAPI shell, the three exposure-tier routers, authoring CRUD,
-> enable/disable and the delete cascade
-> are in place; submit, the CI webhook, the reconciler and SSE payloads are still
-> stubs (D14–D17, D19–D20). The cascade's CAPP adapter remains a D16
-> dependency; the D18 Artifactory adapter uses A0 configuration and fails closed
-> when that configuration is absent — see "Lifecycle" below.
+> **Status: authoring CRUD + lifecycle orchestration + CI webhook; integration
+> pending.** The FastAPI shell, the three exposure-tier routers, authoring CRUD,
+> enable/disable, the delete cascade and the CI webhook (D15) are in place;
+> submit, the reconciler and SSE payloads are still stubs (D17, D19–D20). The
+> real CAPP client is D16: until then a success webhook fails closed with 503,
+> and the cascade's CAPP adapter is a D16 dependency. The D18 Artifactory
+> adapter uses A0 configuration and fails closed when it is absent — see
+> "Lifecycle" below.
 
 ## Database
 
@@ -84,7 +85,9 @@ Git I/O never runs inside a DB transaction or under a row lock:
   commits to git with no session open, then writes the definition,
   `building_sha` and revision in a second short transaction — only if the claim
   (fenced by its deadline) is still its own; otherwise `409`. A git failure
-  restores the previous build state.
+  restores the previous build state. A `namespace` change on an automation
+  that already has a CAPP deployment is refused at the claim
+  (`400 namespace_immutable` — the wallet is fixed at deploy time).
 - Every row-lock acquisition waits at most `DATABASE_LOCK_TIMEOUT_MS` (2000);
   past that the request is `503` + `Retry-After: 1`, never a statement-timeout
   500. Code that later adds CAPP/git calls (D15/D16) must keep this shape:
@@ -155,7 +158,8 @@ round-trip with the provisioned credentials remains an integration acceptance ch
 
 **For other stories:** `run_finalization.finalize_terminated_by_deletion`
 (D17/D20 — deletion-killed runs, no team notice), `deletion_started` (D17 retry
-and E21 re-drive gate), `lock_for_build_mutation` (D15 cutover fencing),
+and E21 re-drive gate), `lock_for_build_mutation` (row lock for future build mutations — D15's cutover
+uses `lock_first` directly, since it needs the deleting row to log CAPP drift),
 `cascade.deboard_wallet(tenant_id, wallet, actor, deps)` (F25/ops — no route).
 
 Never-invoked runs of a deleting/deleted automation are finalized `suppressed`
@@ -174,6 +178,36 @@ with `suppression_reason=inactive`. That enum value needs keep-migrations revisi
 - Resume: `cascade.resume_delete(id, deps)` — D20's
   `POST /internal/automations/{id}/resume-delete`, run by E21 every tick. A
   repeated user DELETE does **not** resume.
+## CI webhook (D15)
+
+`POST /internal/ci-webhook` — called by the script repo's pipeline when one
+automation's build finishes. Payload, responses and the SSE event shape are in
+`automation-contracts.md` §"CI webhook"; the cutover logic is
+`src/bl/builds.py`.
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `CI_WEBHOOK_TOKEN` | _(empty)_ | Shared secret CI sends as `X-Gitlab-Token`. **Empty = every webhook is rejected (401)** — fail closed. |
+| `AUTOMATION_IMAGE_REPOSITORY` | _(empty)_ | Docker repository prefix CI pushes to; a success webhook's `image` must be `{prefix}/{automation_id}@sha256:…`. **Empty = every success webhook is refused (503).** |
+| `CI_WEBHOOK_MAX_BODY_BYTES` | `16384` | Checked from `Content-Length` with the token, before the body is read (`411` without one or with any `Transfer-Encoding`, `413` above it). |
+| `LOG_LEVEL` | `INFO` | Root log level (cutovers and build failures log at INFO, refusals at WARNING). An unknown name falls back to INFO with a warning. |
+| `AUTOMATION_BUILD_LOCK_TIMEOUT_SECONDS` | `1800` | `build_lock_deadline` armed on create/edit (E21 releases past it). Nothing reads it until E21: a webhook that never arrives leaves the row `building` (PUT → 409). |
+| `REDIS_URL` | _(empty)_ | `reload` signal + automation events. Empty = both skipped (periodic reload still converges the index). |
+| `AUTOMATION_RELOAD_CHANNEL` | `reload` | Must match keep-event-handler's subscriber. |
+| `AUTOMATION_EVENTS_CHANNEL` | `automation-events` | Build events for the `GET /events` SSE stream (D19 subscribes). |
+| `REDIS_PUBLISH_TIMEOUT_SECONDS` | `1.0` | Bounds each publish; failures are logged and swallowed. |
+
+Every applied outcome writes an `automation_revisions` row (`build_succeeded` /
+`build_failed`, actor `ci-webhook`). Those enum values need keep-migrations
+revision `revision_action_build_outcomes` applied **before** this service
+deploys — otherwise every applied webhook fails on the insert: a `failed` one
+answers 500 before changing anything, and a success answers 503 *after* CAPP
+accepted the image (logged `CAPP ahead of row`), so CI redelivers until the
+migration lands.
+
+For local poking without CI, send the webhook yourself (the row's
+`building_sha` is the `commit_sha` to use). Until D16 lands a success webhook
+answers 503 — the build stays `building`; a `failed` one works.
 
 ## Run locally
 
@@ -194,7 +228,7 @@ stand-in — see the note at the top of `tests/conftest.py`.
 
 ## Deferred
 
-- Business endpoints (submit, reconciler, CI webhook, runs, SSE payloads) — **D14–D17, D19–D20**.
-- Real CAPP deletion client + run-auth key column (**D16/F24**), A0 Artifactory deployment configuration, and git archive adapter (**D14**).
+- Business endpoints (submit, reconciler, runs, SSE payloads) — **D17, D19–D20**.
+- Real CAPP client — deploy/rollout for the CI webhook and deletion for the cascade — + run-auth key column (**D16/F24**), A0 Artifactory deployment configuration, and git archive adapter (**D14**).
 - Deploy + NetworkPolicy manifests — handled out-of-repo (A0 infra).
-- Real identity-provider integration + tier token verification.
+- Real identity-provider integration + internal-tier token verification (the machine tier's is live since D15).

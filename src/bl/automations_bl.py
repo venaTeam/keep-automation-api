@@ -31,10 +31,12 @@ connection across it drains the small pool.
   between (1) and (3) leaves `building` with a deadline — E21's stuck-build
   branch releases it (spec §6.2).
 
-Coupling note: create/edit set `build_state=building` (spec §5.1). Nothing in
-D13 clears it — the D15 CI webhook flips it to idle/build_failed on build
-completion. Until D15 lands, a freshly created automation stays `building`
-and PUT correctly returns the mid-build 409.
+Build lock: create/edit set `build_state=building` and arm the lock (spec
+§5.1, §4.4) — `building_sha` is the commit CI will build, `build_lock_deadline`
+the point past which E21 may release a lock whose webhook never came. The D15
+CI webhook (`src/bl/builds.py`) admits only the build whose SHA matches
+`building_sha` and clears all three on completion; until it arrives PUT returns
+the mid-build 409.
 """
 import logging
 from dataclasses import dataclass
@@ -55,6 +57,7 @@ from src.exceptions import (
     AutomationValidationError,
 )
 from src.contracts.limits import TIMEOUT_SECONDS_DEFAULT, GRACE_SECONDS_DEFAULT
+from src.contracts.validation_errors import ErrorCode, FieldError
 from src.models.api.automation import AutomationIn
 from src.models.db.automation import (
     DELETION_STATES,
@@ -80,6 +83,29 @@ def _validated(data: AutomationIn) -> None:
     errors = validate_automation(data)
     if errors:
         raise AutomationValidationError(errors)
+
+
+def _check_wallet_unchanged(automation: Automation, data: AutomationIn) -> None:
+    """Refuse moving a deployed automation to another wallet.
+
+    The wallet is fixed when CAPP creates the deployment; later builds only
+    roll it out to a new image (automation-contracts.md §CI webhook). Accepting
+    the change would leave the deployment running in the old wallet — its
+    budget, egress and secret store — while the row named the new one. Before
+    the first successful build there is no deployment, so the wallet is free.
+    Moving a deployed automation is delete + recreate.
+    """
+    if automation.capp_deployment_id is None or data.namespace == automation.namespace:
+        return
+    raise AutomationValidationError(
+        [
+            FieldError(
+                field="namespace",
+                code=ErrorCode.NAMESPACE_IMMUTABLE,
+                message="a deployed automation cannot move to another wallet",
+            )
+        ]
+    )
 
 
 def scoped_get(
@@ -183,7 +209,9 @@ class _BuildClaim:
     previous_building_sha: str | None
 
 
-def _claim_build(tenant_id: str, automation_id: UUID) -> _BuildClaim:
+def _claim_build(
+    tenant_id: str, automation_id: UUID, data: AutomationIn
+) -> _BuildClaim:
     """Transaction 1: admission under the row lock, DB work only."""
     deadline = _build_lock_deadline()
     with get_session() as session:
@@ -195,6 +223,10 @@ def _claim_build(tenant_id: str, automation_id: UUID) -> _BuildClaim:
             raise AutomationLifecycleConflictError(automation.matching_state.value)
         if automation.build_state == BuildState.BUILDING:
             raise AutomationBuildingError()
+        # Checked once, here: the claim fences the row until the finish, so no
+        # build can deploy it in between (`building_sha` stays NULL, so no
+        # webhook matches; anything else loses the claim → superseded).
+        _check_wallet_unchanged(automation, data)
         claim = _BuildClaim(
             automation_id=automation.id,
             script_path=automation.script_path,
@@ -255,7 +287,7 @@ def update_automation(
     # on DNS, and holding one of the few pooled connections across it exhausts
     # the pool under concurrent PUTs. A wasted validation on a 409 costs nothing.
     _validated(data)
-    claim = _claim_build(tenant_id, automation_id)
+    claim = _claim_build(tenant_id, automation_id, data)
 
     # No row lock and no pooled connection held across git I/O.
     try:
