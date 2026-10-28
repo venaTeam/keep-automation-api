@@ -9,7 +9,9 @@ applied build, a late webhook for a SHA a newer edit superseded, a build that
 finished after the reconciler released its lock — is answered `ignored` and
 changes nothing, CAPP included. That is the whole of "idempotent per
 (automation, SHA)": the first delivery clears `building_sha`, so every later
-one fails admission.
+one fails admission. The one exception is a success for a commit whose row a
+raced `failed` left `build_failed` (`_failure_raced`): admitted in both
+admission checks, so a 503'd cutover still finishes on redelivery.
 
 **Success.** CAPP first, then the row. The deployment is created (first build)
 or rolled out (later builds) with **no DB connection held** — a hung CAPP call
@@ -238,6 +240,14 @@ def apply_build_result(
     with get_session() as session:
         automation = _load(session, event.automation_id)
         reason = _admission(automation, event.commit_sha)
+        if (
+            event.status == BuildOutcome.SUCCESS
+            and reason == IgnoredReason.NOT_BUILDING
+            and _failure_raced(session, automation, event.commit_sha)
+        ):
+            # A raced failure is on the row and nothing newer: the redelivery
+            # of a success that was answered 503 must be able to finish.
+            reason = None
         if reason is not None:
             return _ignored(event, reason)
         target = _BuildTarget(
@@ -387,9 +397,11 @@ def _cut_over(
         .values(resulting_digest=event.image)
     )
     session.add(_build_revision(event, RevisionAction.BUILD_SUCCEEDED, event.image))
+    # Built before the commit, from what this locked transaction wrote: once
+    # the commit lands nothing may fail into "not recorded" (no re-read).
+    build_event = _build_event(automation, event.commit_sha)
     session.commit()
-    session.refresh(automation)
-    return _build_event(automation, event.commit_sha)
+    return build_event
 
 
 def _tear_down(

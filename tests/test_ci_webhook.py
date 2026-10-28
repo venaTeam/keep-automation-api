@@ -12,6 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import event, text
 from sqlalchemy.exc import OperationalError
+from sqlalchemy.orm import Session
 
 from src import config
 from src.api import deps
@@ -1075,6 +1076,153 @@ def test_success_never_overrides_an_edit_made_after_the_raced_failure(
     assert automation["building_sha"] == revisions(test_engine, created["id"])[-1]["git_sha"]
     assert automation["active_digest"] is None
     assert "CAPP ahead of row" in caplog.text
+
+
+def _report_failure(automation_id: str, sha: str) -> None:
+    builds.apply_build_result(
+        CiWebhookIn(**failed(automation_id, sha)),
+        InMemoryCappClient(),
+        RecordingReload(),
+        RecordingEvents(),
+    )
+
+
+def test_success_never_overrides_a_newer_edit_whose_build_already_failed(
+    harness, test_engine
+):
+    # The newer edit's own build failed fast, so the row is `build_failed`
+    # again — but for the newer commit. The raced success must not cut over.
+    created = harness.create()
+    sha = row(test_engine, created["id"])["building_sha"]
+
+    def fail_edit_fail():
+        _report_failure(created["id"], sha)
+        harness.edit(created["id"])
+        _report_failure(created["id"], row(test_engine, created["id"])["building_sha"])
+
+    result = builds.apply_build_result(
+        CiWebhookIn(**success(created["id"], sha)),
+        _ProbingCapp(test_engine, fail_edit_fail),
+        RecordingReload(),
+        RecordingEvents(),
+    )
+
+    assert (result.status, result.reason) == ("ignored", "not_building")
+    automation = row(test_engine, created["id"])
+    assert automation["build_state"] == "build_failed"
+    assert automation["active_digest"] is None
+    assert automation["capp_deployment_id"] is None
+
+
+def test_raced_failure_still_reconciles_after_a_toggle_revision(harness, test_engine):
+    # Only create/edit revisions say which commit the row is building; a newer
+    # enable/disable row (no git_sha) must not hide the raced failure.
+    created = harness.create()
+    sha = row(test_engine, created["id"])["building_sha"]
+
+    def fail_then_toggle():
+        _report_failure(created["id"], sha)
+        with test_engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO automation_revisions "
+                    "(id, automation_id, action, actor, created_at) "
+                    "VALUES (gen_random_uuid(), :id, 'disable', 'someone', now())"
+                ),
+                {"id": created["id"]},
+            )
+
+    result = builds.apply_build_result(
+        CiWebhookIn(**success(created["id"], sha)),
+        _ProbingCapp(test_engine, fail_then_toggle),
+        RecordingReload(),
+        RecordingEvents(),
+    )
+
+    assert result.status == "applied"
+    assert row(test_engine, created["id"])["active_digest"] == image(created["id"])
+
+
+def test_redelivery_after_a_raced_failure_and_a_503_completes_the_cutover(
+    harness, test_engine, monkeypatch
+):
+    # A raced failure leaves the row `build_failed`; the cutover then fails to
+    # be recorded (503, "redeliver"). The redelivery must finish it, not stop
+    # at the first admission check on `not_building`.
+    created = harness.create()
+    sha = row(test_engine, created["id"])["building_sha"]
+    real_lock_first = builds.lock_first
+
+    def broken(session, query):
+        raise OperationalError("SELECT ... FOR UPDATE", {}, Exception("connection lost"))
+
+    def fail_then_break_the_db():
+        _report_failure(created["id"], sha)
+        monkeypatch.setattr(builds, "lock_first", broken)
+
+    capp = _ProbingCapp(test_engine, fail_then_break_the_db)
+    harness.client.app.dependency_overrides[get_capp_client] = lambda: capp
+    assert harness.webhook(success(created["id"], sha)).status_code == 503
+    assert row(test_engine, created["id"])["build_state"] == "build_failed"
+
+    monkeypatch.setattr(builds, "lock_first", real_lock_first)
+    capp.during_call = None
+    assert harness.webhook(success(created["id"], sha)).json() == {"status": "applied"}
+    automation = row(test_engine, created["id"])
+    assert automation["build_state"] == "idle"
+    assert automation["active_digest"] == image(created["id"])
+    assert automation["capp_deployment_id"] == f"automation-{created['id']}"
+
+
+def test_teardown_uses_the_wallet_the_deployment_was_created_in(harness, test_engine):
+    # Raced failure → wallet-moving edit → that edit's build fails → DELETE,
+    # all while the first create is inside CAPP. The row now names the new
+    # wallet; the deployment lives in the old one, so that is where it goes.
+    created = harness.create()
+    sha = row(test_engine, created["id"])["building_sha"]
+
+    def race_to_deletion():
+        _report_failure(created["id"], sha)
+        harness.edit(created["id"], namespace="other-wallet")
+        _report_failure(created["id"], row(test_engine, created["id"])["building_sha"])
+        with test_engine.begin() as conn:
+            conn.execute(
+                text("UPDATE automations SET matching_state = 'deleting' WHERE id = :id"),
+                {"id": created["id"]},
+            )
+
+    deletion = RecordingDeletion()
+    result = builds.apply_build_result(
+        CiWebhookIn(**success(created["id"], sha)),
+        _ProbingCapp(test_engine, race_to_deletion),
+        RecordingReload(),
+        RecordingEvents(),
+        deletion,
+    )
+
+    assert result.reason == "deleting"
+    assert row(test_engine, created["id"])["namespace"] == "other-wallet"
+    assert {call[1] for call in deletion.calls} == {"payments-wallet"}
+
+
+def test_a_failure_after_the_commit_is_not_reported_as_not_recorded(
+    harness, test_engine, monkeypatch
+):
+    # Once the cutover commits, nothing may turn the answer into "not
+    # recorded" — a post-commit read failing would send operators chasing
+    # drift that does not exist and skip the reload/event.
+    created = harness.create()
+    sha = row(test_engine, created["id"])["building_sha"]
+
+    def refresh_fails(self, *args, **kwargs):
+        raise OperationalError("SELECT", {}, Exception("connection lost"))
+
+    monkeypatch.setattr(Session, "refresh", refresh_fails)
+    resp = harness.webhook(success(created["id"], sha))
+
+    assert resp.json() == {"status": "applied"}
+    assert harness.reload.count == 1
+    assert harness.events.events[-1]["build_state"] == "idle"
 
 
 def _with_hook(call, hook):
