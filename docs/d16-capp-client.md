@@ -6,6 +6,17 @@ create/get/update/delete against the supplied `caap.yaml` contract. It uses
 It never reads or writes the database, advances `active_digest`, polls readiness,
 or invokes `/run`.
 
+## Module responsibilities
+
+- `capp_client.py` validates approved wallet targets and builds resource requests.
+- `capp_transport.py` owns the HTTP pool, authentication, token refresh, deadlines,
+  status handling, and rejection of responses that echo identity material.
+- `capp_responses.py` validates responses and produces typed resource results.
+
+The public async resource API and client lifetime are unchanged. Every deletion
+cascade step now has an async interface; each step offloads its own blocking
+DB, registry, Git, or reload calls. The runner awaits all steps uniformly.
+
 ## Configuration
 
 Inject these settings into **keep-automation-api only**, through its deployment

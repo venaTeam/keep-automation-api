@@ -351,7 +351,7 @@ async def test_refresh_failure_falls_back_to_one_login(refresh_reply):
         ]
     )
     (await adapter.get_capp("team", NAME))
-    adapter._clock = lambda: NOW + timedelta(minutes=59, seconds=45)
+    adapter._transport._clock = lambda: NOW + timedelta(minutes=59, seconds=45)
     (await adapter.get_capp("team", NAME))
     assert [c[1].split("/")[-1] for c in wire.calls] == [
         "login",
@@ -364,7 +364,9 @@ async def test_refresh_failure_falls_back_to_one_login(refresh_reply):
 
 async def test_concurrent_first_login_serialized():
     adapter, wire = client([(HTTPStatus.OK, tokens())])
-    results = await asyncio.gather(*(adapter._authenticate() for _ in range(32)))
+    results = await asyncio.gather(
+        *(adapter._transport._authenticate() for _ in range(32))
+    )
     assert results == [IDENTITY[2]] * 32
     assert len(wire.calls) == 1
 
@@ -704,7 +706,7 @@ async def test_slow_requests_overlap_and_login_happens_once():
             adapter.get_capp("team", NAME), adapter.get_capp("team", NAME)
         )
     assert maximum == 2 and login_calls == 1
-    assert adapter._http.is_closed
+    assert adapter._transport._http.is_closed
 
 
 async def test_concurrent_401_responses_share_one_refresh():
@@ -799,13 +801,16 @@ async def test_cancelled_login_releases_auth_lock():
         transport=httpx.MockTransport(handler),
         clock=lambda: NOW,
     ) as adapter:
-        task = asyncio.create_task(adapter._authenticate())
+        task = asyncio.create_task(adapter._transport._authenticate())
         await asyncio.wait_for(started.wait(), timeout=1)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
-        assert not adapter._auth_lock.locked()
-        assert await asyncio.wait_for(adapter._authenticate(), timeout=1) == IDENTITY[2]
+        assert not adapter._transport._auth_lock.locked()
+        assert (
+            await asyncio.wait_for(adapter._transport._authenticate(), timeout=1)
+            == IDENTITY[2]
+        )
     assert calls == 2
 
 
@@ -832,6 +837,9 @@ async def test_app_lifespan_closes_its_client_and_does_not_share_across_apps(
             Request({"type": "http", "app": second_app})
         )
         assert first is not second
-        assert not first._http.is_closed and not second._http.is_closed
-    assert first._http.is_closed and second._http.is_closed
+        assert (
+            not first._transport._http.is_closed
+            and not second._transport._http.is_closed
+        )
+    assert first._transport._http.is_closed and second._transport._http.is_closed
     assert not hasattr(first_app.state, "capp_client")

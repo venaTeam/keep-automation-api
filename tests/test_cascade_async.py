@@ -40,7 +40,7 @@ def state(monkeypatch):
     def checkpoint(automation_id, completed, **values):
         assert threading.get_ident() != loop_thread
         calls.append(f"checkpoint-{completed}")
-        if row.delete_cascade_step != completed - 1:
+        if (row.delete_cascade_step or 0) != completed - 1:
             return False
         row.delete_cascade_step = completed
         for key, value in values.items():
@@ -82,9 +82,22 @@ async def test_cascade_awaits_capp_and_offloads_sync_steps(state):
             assert threading.get_ident() != loop_thread
             deps.registry.delete_image(automation_id, entry)
 
+    class Git:
+        def archive(self, automation_id, actor):
+            assert threading.get_ident() != loop_thread
+            return deps.git.archive(automation_id, actor)
+
+    class Publisher:
+        def publish_reload(self):
+            assert threading.get_ident() != loop_thread
+            deps.publisher.publish_reload()
+
+    row.delete_cascade_step = None
     result = await cascade.run_cascade(
-        row.id, cascade.CascadeDeps(Capp(), Registry(), deps.git, deps.publisher)
+        row.id, cascade.CascadeDeps(Capp(), Registry(), Git(), Publisher())
     )
+    assert world.publishes == 1
+    assert calls.index("checkpoint-1") < calls.index("delete-capp")
     assert result.completed
     assert (
         calls.index("delete-capp")
@@ -167,3 +180,25 @@ async def test_deboard_offloads_intake_and_awaits_each_cascade(state, monkeypatc
         "tenant", row.namespace, "operator", deps_for(world)
     )
     assert result.deleted == (row.id,)
+
+
+@pytest.mark.parametrize(
+    "operation,error,checkpoint",
+    [
+        ("list_images", "registry_list_failed", 2),
+        ("delete_image", "registry_delete_failed", 2),
+        ("archive", "git_archive_failed", 3),
+    ],
+)
+async def test_blocking_adapter_failure_preserves_checkpoint_and_resumes(
+    state, operation, error, checkpoint
+):
+    row, _, _ = state
+    world = World()
+    seed_external(world, row.id, row.namespace)
+    world.failures[operation] = 1
+    result = await cascade.run_cascade(row.id, deps_for(world))
+    assert result.error == error
+    assert row.delete_cascade_step == checkpoint
+    assert row.matching_state == MatchingState.DELETING
+    assert (await cascade.resume_delete(row.id, deps_for(world))).completed

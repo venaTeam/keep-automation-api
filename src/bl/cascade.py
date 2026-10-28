@@ -266,12 +266,12 @@ def _save(automation_id: UUID, completed: int, **values) -> None:
         raise CascadeStepError(completed, "checkpoint_failed", exc) from exc
 
 
-def _step_mark_deleting(automation: Automation, deps: CascadeDeps) -> None:
+async def _step_mark_deleting(automation: Automation, deps: CascadeDeps) -> None:
     # Only reachable for a `deleting` row with no checkpoint (a row flipped
     # outside `begin_delete`). The state and revision are already there; record
     # the checkpoint and re-signal.
-    _save(automation.id, STEP_MARKED_DELETING)
-    deps.publisher.publish_reload()
+    await run_in_threadpool(_save, automation.id, STEP_MARKED_DELETING)
+    await run_in_threadpool(deps.publisher.publish_reload)
 
 
 async def _step_delete_capp_resources(
@@ -304,14 +304,17 @@ async def _step_delete_capp_resources(
     )
 
 
-def _step_delete_images(automation: Automation, deps: CascadeDeps) -> None:
+async def _step_delete_images(automation: Automation, deps: CascadeDeps) -> None:
     step = STEP_IMAGES_DELETED
     try:
-        entries = deps.registry.list_image_entries(automation.id)
+        entries = await run_in_threadpool(
+            deps.registry.list_image_entries, automation.id
+        )
     except Exception as exc:  # noqa: BLE001
         raise CascadeStepError(step, "registry_list_failed", exc) from exc
     for entry in entries:
-        _external(
+        await run_in_threadpool(
+            _external,
             step,
             "registry_delete_failed",
             deps.registry.delete_image,
@@ -321,32 +324,38 @@ def _step_delete_images(automation: Automation, deps: CascadeDeps) -> None:
     # Advance only on an empty inventory: a digest pushed while we deleted (a
     # late build, C2/C3) must not be left behind under a "done" checkpoint.
     try:
-        remaining = deps.registry.list_image_entries(automation.id)
+        remaining = await run_in_threadpool(
+            deps.registry.list_image_entries, automation.id
+        )
     except Exception as exc:  # noqa: BLE001
         raise CascadeStepError(step, "registry_list_failed", exc) from exc
     if remaining:
         raise CascadeStepError(step, "registry_inventory_not_empty")
-    _save(automation.id, step)
+    await run_in_threadpool(_save, automation.id, step)
 
 
-def _step_archive_script(automation: Automation, deps: CascadeDeps) -> None:
+async def _step_archive_script(automation: Automation, deps: CascadeDeps) -> None:
     # `updated_by` is the deleting actor: set at step 1 and never touched again
     # (edits and toggles are refused once deleting).
-    _external(
+    await run_in_threadpool(
+        _external,
         STEP_SCRIPT_ARCHIVED,
         "git_archive_failed",
         deps.git.archive,
         automation.id,
         automation.updated_by,
     )
-    _save(automation.id, STEP_SCRIPT_ARCHIVED)
+    await run_in_threadpool(_save, automation.id, STEP_SCRIPT_ARCHIVED)
 
 
-def _step_mark_deleted(automation: Automation, deps: CascadeDeps) -> None:
-    _save(automation.id, STEP_DELETED, matching_state=MatchingState.DELETED)
+async def _step_mark_deleted(automation: Automation, deps: CascadeDeps) -> None:
+    await run_in_threadpool(
+        _save, automation.id, STEP_DELETED, matching_state=MatchingState.DELETED
+    )
 
 
-_SYNC_STEPS = {
+_STEPS: dict[int, Callable[[Automation, CascadeDeps], Awaitable[None]]] = {
+    STEP_CAPP_RESOURCES_DELETED: _step_delete_capp_resources,
     STEP_MARKED_DELETING: _step_mark_deleting,
     STEP_IMAGES_DELETED: _step_delete_images,
     STEP_SCRIPT_ARCHIVED: _step_archive_script,
@@ -372,10 +381,7 @@ async def run_cascade(automation_id: UUID, deps: CascadeDeps) -> CascadeResult:
 
         next_step = (automation.delete_cascade_step or 0) + 1
         try:
-            if next_step == STEP_CAPP_RESOURCES_DELETED:
-                await _step_delete_capp_resources(automation, deps)
-            else:
-                await run_in_threadpool(_SYNC_STEPS[next_step], automation, deps)
+            await _STEPS[next_step](automation, deps)
         except CascadeStepError as exc:
             logger.warning(
                 "automations: delete cascade for %s stopped at step %s: %s (%s)",
