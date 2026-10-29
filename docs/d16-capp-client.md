@@ -12,6 +12,9 @@ or invokes `/run`.
 - `capp_transport.py` owns the HTTP pool, authentication, token refresh, deadlines,
   status handling, and rejection of responses that echo identity material.
 - `capp_responses.py` validates responses and produces typed resource results.
+- `capp_validation.py` validates nested request fields against the supplied CAPP
+  contract without coercing values or filling omitted update fields. Invalid
+  request serialization raises sanitized `invalid_request` before authentication.
 
 The public async resource API and client lifetime are unchanged. Every deletion
 cascade step now has an async interface; each step offloads its own blocking

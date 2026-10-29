@@ -13,6 +13,7 @@ import httpx
 
 from src.bl.capp_errors import CappError, CappErrorCode, error_for_status
 from src.bl.capp_responses import required_string
+from src.bl.capp_validation import encode_request
 
 JsonObject = dict[str, Any]
 _MAX_RESPONSE_BYTES = 4 * 1024 * 1024
@@ -83,6 +84,7 @@ class CappTransport:
         body: JsonObject | None = None,
         token: str = "",
     ) -> tuple[int, JsonObject]:
+        content = encode_request(body)
         error = CappError(CappErrorCode.MALFORMED_RESPONSE)
         try:
             headers = {"Content-Type": "application/json", "Accept": "application/json"}
@@ -95,7 +97,7 @@ class CappTransport:
                     method,
                     self._base_url + path,
                     headers=headers,
-                    content=json.dumps(body).encode() if body is not None else None,
+                    content=content,
                     timeout=self._timeout,
                 ) as response:
                     status = response.status_code
@@ -173,6 +175,7 @@ class CappTransport:
     async def request(
         self, method: HTTPMethod, path: str, body: JsonObject | None = None
     ) -> JsonObject:
+        encode_request(body)  # Reject invalid input before any authentication I/O.
         token = await self._authenticate()
         status, payload = await self._send(method, path, body, token)
         if status == HTTPStatus.UNAUTHORIZED:

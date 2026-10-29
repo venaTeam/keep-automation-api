@@ -24,6 +24,7 @@ from src.bl.capp_models import (
 )
 from src.bl.capp_responses import parse_capp, parse_secret
 from src.bl.capp_transport import CappTransport
+from src.bl.capp_validation import validate_config
 
 JsonObject: TypeAlias = dict[str, Any]
 WalletTarget: TypeAlias = CappWalletTarget | str
@@ -125,6 +126,7 @@ class CappClient:
             raise CappError(CappErrorCode.INVALID_REQUEST)
         if spec.config.get("state", "enabled") != "enabled":
             raise CappError(CappErrorCode.INVALID_REQUEST)
+        validate_config(spec.config)
         return {**copy.deepcopy(spec.config), "name": spec.name, "image": spec.image}
 
     async def create_capp(
