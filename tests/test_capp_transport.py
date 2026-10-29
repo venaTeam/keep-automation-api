@@ -379,3 +379,78 @@ async def test_aclose_releases_injected_http_transport():
     assert not wire.closed
     await adapter.aclose()
     assert wire.closed
+
+
+@pytest.mark.parametrize("credential", IDENTITY[2:])
+@pytest.mark.parametrize("in_key", [False, True])
+async def test_inflight_response_rejects_tokens_rotated_by_another_request(
+    credential, in_key, caplog
+):
+    old_request_started = asyncio.Event()
+    rotated_request_finished = asyncio.Event()
+    echoed = {credential: "value"} if in_key else {"nested": [{"value": credential}]}
+
+    async def handler(request):
+        path = request.url.path
+        if path.endswith("/login"):
+            return httpx.Response(HTTPStatus.OK, json=tokens())
+        if path.endswith("/refresh"):
+            return httpx.Response(
+                HTTPStatus.OK,
+                json={**tokens("rotated-access"), "refreshToken": "rotated-refresh"},
+            )
+        if path == "/old":
+            assert request.headers["Authorization"] == "Bearer " + IDENTITY[2]
+            old_request_started.set()
+            await asyncio.wait_for(rotated_request_finished.wait(), timeout=1)
+            return httpx.Response(HTTPStatus.OK, json=echoed)
+        if request.headers["Authorization"] == "Bearer " + IDENTITY[2]:
+            return httpx.Response(HTTPStatus.UNAUTHORIZED)
+        return httpx.Response(HTTPStatus.OK, json={"ok": True})
+
+    async with transport_client(
+        base_url="https://capp.example",
+        username=IDENTITY[0],
+        password=IDENTITY[1],
+        transport=httpx.MockTransport(handler),
+        clock=lambda: NOW,
+    ) as adapter:
+
+        async def rotate():
+            await asyncio.wait_for(old_request_started.wait(), timeout=1)
+            try:
+                return await adapter.request(HTTPMethod.GET, "/rotate")
+            finally:
+                rotated_request_finished.set()
+
+        results = await asyncio.gather(
+            adapter.request(HTTPMethod.GET, "/old"), rotate(), return_exceptions=True
+        )
+    error, success = results
+    assert isinstance(error, CappError)
+    assert error.code is CappErrorCode.MALFORMED_RESPONSE
+    assert error.__context__ is None
+    assert success == {"ok": True}
+    exposed = (
+        caplog.text + str(vars(error)) + "".join(traceback.format_exception(error))
+    )
+    assert credential not in exposed
+
+
+@pytest.mark.parametrize("credential", IDENTITY[2:])
+async def test_401_retry_still_rejects_original_tokens(credential):
+    adapter, _ = client(
+        [
+            (HTTPStatus.OK, tokens()),
+            (HTTPStatus.UNAUTHORIZED, {}),
+            (
+                HTTPStatus.OK,
+                {**tokens("rotated-access"), "refreshToken": "rotated-refresh"},
+            ),
+            (HTTPStatus.OK, {"echo": credential}),
+        ]
+    )
+    with pytest.raises(CappError) as caught:
+        await adapter.request(HTTPMethod.GET, "/resource")
+    assert caught.value.code is CappErrorCode.MALFORMED_RESPONSE
+    assert caught.value.__context__ is None

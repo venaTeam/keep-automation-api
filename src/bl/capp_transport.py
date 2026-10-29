@@ -177,9 +177,12 @@ class CappTransport:
     ) -> JsonObject:
         encode_request(body)  # Reject invalid input before any authentication I/O.
         token = await self._authenticate()
+        # Snapshot before yielding to HTTP: another request may rotate both tokens.
+        request_tokens = (token, self._refresh_token)
         status, payload = await self._send(method, path, body, token)
         if status == HTTPStatus.UNAUTHORIZED:
             token = await self._authenticate(failed_token=token)
+            request_tokens += (token, self._refresh_token)
             status, payload = await self._send(method, path, body, token)
         if method == HTTPMethod.DELETE and status in (
             HTTPStatus.NO_CONTENT,
@@ -187,12 +190,14 @@ class CappTransport:
         ):
             return {}
         if status == _SUCCESS_STATUS.get(method):
-            if self._contains_identity(payload):
+            if self._contains_identity(payload, request_tokens):
                 raise CappError(CappErrorCode.MALFORMED_RESPONSE)
             return payload
         raise error_for_status(status)
 
-    def _contains_identity(self, value: object) -> bool:
+    def _contains_identity(
+        self, value: object, request_tokens: tuple[str, ...]
+    ) -> bool:
         """Do not expose identity material echoed in an otherwise valid body."""
         if isinstance(value, str):
             return any(
@@ -202,13 +207,15 @@ class CappTransport:
                     self._password,
                     self._access_token,
                     self._refresh_token,
+                    *request_tokens,
                 )
             )
         if isinstance(value, dict):
             return any(
-                self._contains_identity(k) or self._contains_identity(v)
+                self._contains_identity(k, request_tokens)
+                or self._contains_identity(v, request_tokens)
                 for k, v in value.items()
             )
         if isinstance(value, list):
-            return any(self._contains_identity(item) for item in value)
+            return any(self._contains_identity(item, request_tokens) for item in value)
         return False
