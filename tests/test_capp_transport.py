@@ -454,3 +454,21 @@ async def test_401_retry_still_rejects_original_tokens(credential):
         await adapter.request(HTTPMethod.GET, "/resource")
     assert caught.value.code is CappErrorCode.MALFORMED_RESPONSE
     assert caught.value.__context__ is None
+
+
+@pytest.mark.parametrize("depth", [600, None])
+@pytest.mark.parametrize("during_login", [False, True])
+async def test_deep_response_is_sanitized(depth, during_login, caplog):
+    import sys
+
+    depth = depth or sys.getrecursionlimit() * 2
+    raw = b'{"nested":' + b"[" * depth + b'"access-sensitive"' + b"]" * depth + b"}"
+    prefix = [] if during_login else [(HTTPStatus.OK, tokens())]
+    adapter, wire = client([*prefix, (HTTPStatus.OK, raw)])
+    with pytest.raises(CappError) as caught:
+        await adapter.request(HTTPMethod.GET, "/resource")
+    assert caught.value.code is CappErrorCode.MALFORMED_RESPONSE
+    assert caught.value.__context__ is None
+    assert len(wire.calls) == len(prefix) + 1
+    exposed = caplog.text + "".join(traceback.format_exception(caught.value))
+    assert all(credential not in exposed for credential in IDENTITY)

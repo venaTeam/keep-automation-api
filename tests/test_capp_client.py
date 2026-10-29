@@ -588,3 +588,27 @@ async def test_client_context_closes_http_transport():
     ):
         assert not wire.closed
     assert wire.closed
+
+
+@pytest.mark.parametrize("update", [False, True])
+async def test_empty_custom_resources_conflicts_with_size_before_network(update):
+    adapter, wire = client([])
+    spec = CappRequest(NAME, IMAGE, {"size": "small", "customResources": {}})
+    with pytest.raises(CappError) as caught:
+        if update:
+            await adapter.update_capp("team", NAME, spec)
+        else:
+            await adapter.create_capp("team", spec)
+    assert caught.value.code is CappErrorCode.INVALID_REQUEST
+    assert not wire.calls
+
+
+async def test_empty_custom_resources_replaces_existing_size():
+    adapter, wire = client(
+        [(HTTPStatus.OK, tokens()), (HTTPStatus.OK, capp()), (HTTPStatus.OK, capp())]
+    )
+    await adapter.update_capp(
+        "team", NAME, CappRequest(NAME, IMAGE, {"customResources": {}})
+    )
+    assert wire.calls[-1][2]["customResources"] == {}
+    assert "size" not in wire.calls[-1][2]

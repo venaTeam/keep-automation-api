@@ -118,7 +118,7 @@ class CappTransport:
             error = CappError(CappErrorCode.TIMEOUT, retryable=True)
         except (httpx.RequestError, OSError):
             error = CappError(CappErrorCode.UNAVAILABLE, retryable=True)
-        except (ValueError, TypeError, UnicodeError):
+        except (ValueError, TypeError, UnicodeError, RecursionError):
             error = CappError(CappErrorCode.MALFORMED_RESPONSE)
         # Raise outside handlers so raw transport errors aren't retained as context.
         # Cancellation is deliberately not caught; async callers own task lifetime.
@@ -199,23 +199,23 @@ class CappTransport:
         self, value: object, request_tokens: tuple[str, ...]
     ) -> bool:
         """Do not expose identity material echoed in an otherwise valid body."""
-        if isinstance(value, str):
-            return any(
-                secret and secret in value
-                for secret in (
-                    self._username,
-                    self._password,
-                    self._access_token,
-                    self._refresh_token,
-                    *request_tokens,
-                )
-            )
-        if isinstance(value, dict):
-            return any(
-                self._contains_identity(k, request_tokens)
-                or self._contains_identity(v, request_tokens)
-                for k, v in value.items()
-            )
-        if isinstance(value, list):
-            return any(self._contains_identity(item, request_tokens) for item in value)
+        secrets = (
+            self._username,
+            self._password,
+            self._access_token,
+            self._refresh_token,
+            *request_tokens,
+        )
+        # JSON can parse successfully at depths that exhaust a recursive scanner.
+        pending = [value]
+        while pending:
+            item = pending.pop()
+            if isinstance(item, str):
+                if any(secret and secret in item for secret in secrets):
+                    return True
+            elif isinstance(item, dict):
+                pending.extend(item.keys())
+                pending.extend(item.values())
+            elif isinstance(item, list):
+                pending.extend(item)
         return False

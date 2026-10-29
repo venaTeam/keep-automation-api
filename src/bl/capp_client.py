@@ -122,7 +122,10 @@ class CappClient:
             raise CappError(CappErrorCode.INVALID_REQUEST)
         if not isinstance(spec.config, dict) or spec.config.keys() - _FIELDS:
             raise CappError(CappErrorCode.INVALID_REQUEST)
-        if spec.config.get("size") and spec.config.get("customResources"):
+        if (
+            spec.config.get("size") is not None
+            and spec.config.get("customResources") is not None
+        ):
             raise CappError(CappErrorCode.INVALID_REQUEST)
         if spec.config.get("state", "enabled") != "enabled":
             raise CappError(CappErrorCode.INVALID_REQUEST)
@@ -161,9 +164,9 @@ class CappClient:
         if not body.get("size") and current.get("resources"):
             body["customResources"] = current["resources"]
         body = _merge(body, changes)
-        if changes.get("size"):
+        if changes.get("size") is not None:
             body.pop("customResources", None)
-        elif changes.get("customResources"):
+        elif changes.get("customResources") is not None:
             body.pop("size", None)
         # Per caap.yaml the backend preserves metadata/resourceVersion itself.
         return parse_capp(
