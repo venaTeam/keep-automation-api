@@ -175,6 +175,9 @@ class DeploymentConfig(WireModel):
     eventSourcesSpec: EventSources | None = None
 
 
+CONFIG_FIELDS = frozenset(DeploymentConfig.__fields__)
+
+
 def encode_request(body: dict | None) -> bytes | None:
     """Never retain serialization errors, which can contain request secrets."""
     if body is None:
@@ -192,12 +195,11 @@ def validate_config(
     # Validate original wire data, preserving omitted fields and explicit nulls.
     # Upstream settings use MALFORMED_RESPONSE; caller input uses INVALID_REQUEST.
     try:
-        encode_request(config)
         DeploymentConfig.parse_obj(config)
         if config.get("size") is not None and config.get("customResources") is not None:
             raise ValueError("conflicting sizing")
         return
-    except (CappError, ValidationError, TypeError, ValueError):
+    except (ValidationError, TypeError, ValueError, RecursionError):
         pass
     # Do not retain validation exceptions containing input or response values.
     raise CappError(error_code)

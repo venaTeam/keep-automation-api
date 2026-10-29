@@ -81,10 +81,9 @@ class CappTransport:
         self,
         method: HTTPMethod,
         path: str,
-        body: JsonObject | None = None,
+        content: bytes | None = None,
         token: str = "",
     ) -> tuple[int, JsonObject]:
-        content = encode_request(body)
         error = CappError(CappErrorCode.MALFORMED_RESPONSE)
         try:
             headers = {"Content-Type": "application/json", "Accept": "application/json"}
@@ -149,7 +148,7 @@ class CappTransport:
 
     async def _login_request(self, operation: str, body: JsonObject) -> None:
         status, payload = await self._send(
-            HTTPMethod.POST, f"/api/v1/auth/{operation}", body
+            HTTPMethod.POST, f"/api/v1/auth/{operation}", encode_request(body)
         )
         if status != HTTPStatus.OK:
             raise error_for_status(status)
@@ -175,15 +174,16 @@ class CappTransport:
     async def request(
         self, method: HTTPMethod, path: str, body: JsonObject | None = None
     ) -> JsonObject:
-        encode_request(body)  # Reject invalid input before any authentication I/O.
+        # Encode once before authentication; reuse the snapshot on a 401 retry.
+        content = encode_request(body)
         token = await self._authenticate()
         # Snapshot before yielding to HTTP: another request may rotate both tokens.
         request_tokens = (token, self._refresh_token)
-        status, payload = await self._send(method, path, body, token)
+        status, payload = await self._send(method, path, content, token)
         if status == HTTPStatus.UNAUTHORIZED:
             token = await self._authenticate(failed_token=token)
             request_tokens += (token, self._refresh_token)
-            status, payload = await self._send(method, path, body, token)
+            status, payload = await self._send(method, path, content, token)
         if method == HTTPMethod.DELETE and status in (
             HTTPStatus.NO_CONTENT,
             HTTPStatus.NOT_FOUND,

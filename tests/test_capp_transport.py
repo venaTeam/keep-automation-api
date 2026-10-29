@@ -472,3 +472,31 @@ async def test_deep_response_is_sanitized(depth, during_login, caplog):
     assert len(wire.calls) == len(prefix) + 1
     exposed = caplog.text + "".join(traceback.format_exception(caught.value))
     assert all(credential not in exposed for credential in IDENTITY)
+
+
+async def test_request_body_snapshot_is_preserved_across_authentication_and_retry():
+    body = {"value": "original"}
+    sent = []
+
+    async def handler(request):
+        if request.url.path.endswith("/login"):
+            body["value"] = "changed-during-login"
+            return httpx.Response(HTTPStatus.OK, json=tokens())
+        if request.url.path.endswith("/refresh"):
+            body["value"] = "changed-during-refresh"
+            return httpx.Response(HTTPStatus.OK, json=tokens("new-access"))
+        sent.append(request.content)
+        if len(sent) == 1:
+            return httpx.Response(HTTPStatus.UNAUTHORIZED)
+        return httpx.Response(HTTPStatus.CREATED, json={"ok": True})
+
+    async with transport_client(
+        base_url="https://capp.example",
+        username=IDENTITY[0],
+        password=IDENTITY[1],
+        transport=httpx.MockTransport(handler),
+        clock=lambda: NOW,
+    ) as adapter:
+        result = await adapter.request(HTTPMethod.POST, "/resource", body)
+    assert result == {"ok": True}
+    assert sent == [b'{"value": "original"}', b'{"value": "original"}']

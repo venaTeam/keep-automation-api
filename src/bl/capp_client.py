@@ -24,28 +24,11 @@ from src.bl.capp_models import (
 )
 from src.bl.capp_responses import parse_capp, parse_secret
 from src.bl.capp_transport import CappTransport
-from src.bl.capp_validation import validate_config
+from src.bl.capp_validation import CONFIG_FIELDS, validate_config
 
 JsonObject: TypeAlias = dict[str, Any]
 WalletTarget: TypeAlias = CappWalletTarget | str
 
-_FIELDS = frozenset(
-    (
-        "scaleSpec",
-        "state",
-        "containerName",
-        "size",
-        "customResources",
-        "env",
-        "volumeMounts",
-        "routeSpec",
-        "logSpec",
-        "nfsVolumes",
-        "secretVolumes",
-        "configMapVolumes",
-        "eventSourcesSpec",
-    )
-)
 _OWNED_SECRET = re.compile(
     r"automation-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-run-auth"
 )
@@ -120,7 +103,7 @@ class CappClient:
             r"[^\s@]+@sha256:[0-9a-f]{64}", spec.image
         ):
             raise CappError(CappErrorCode.INVALID_REQUEST)
-        if not isinstance(spec.config, dict) or spec.config.keys() - _FIELDS:
+        if not isinstance(spec.config, dict) or spec.config.keys() - CONFIG_FIELDS:
             raise CappError(CappErrorCode.INVALID_REQUEST)
         if spec.config.get("state", "enabled") != "enabled":
             raise CappError(CappErrorCode.INVALID_REQUEST)
@@ -154,7 +137,7 @@ class CappClient:
             raise CappError(CappErrorCode.INVALID_REQUEST)
         current = await self._transport.request(HTTPMethod.GET, path)
         parse_capp(current, self._target(target).wallet_name, name)
-        body = {k: v for k, v in current.items() if k in _FIELDS}
+        body = {k: v for k, v in current.items() if k in CONFIG_FIELDS}
         # Response 'resources' is the resolved value; request uses customResources.
         if not body.get("size") and current.get("resources"):
             body["customResources"] = current["resources"]
@@ -164,7 +147,7 @@ class CappClient:
             body.pop("customResources", None)
         elif changes.get("customResources") is not None:
             body.pop("size", None)
-        validate_config({k: v for k, v in body.items() if k in _FIELDS})
+        validate_config({k: v for k, v in body.items() if k in CONFIG_FIELDS})
         # Per caap.yaml the backend preserves metadata/resourceVersion itself.
         return parse_capp(
             await self._transport.request(HTTPMethod.PUT, path, body),
