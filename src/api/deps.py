@@ -5,14 +5,15 @@
 - machine tier -> GitLab secret token (verified in D15).
 - internal tier -> service token (verified in D17/D20).
 """
-from fastapi import Depends, Header
+
+from fastapi import Depends, Header, Request
 
 from src import config
 from src.bl.cascade import CascadeDeps
 from src.bl.cascade_adapters import (
     CappDeletionClient,
     RegistryClient,
-    get_default_capp_deletion_client,
+    build_capp_client,
     get_default_registry_client,
 )
 from src.bl.git_client import GitClient, build_gitlab_client
@@ -42,9 +43,15 @@ def get_reload_publisher() -> ReloadPublisher:
     return get_default_reload_publisher()
 
 
-def get_capp_deletion_client() -> CappDeletionClient:
-    """CAPP Capp/Secret deletion. Fails closed until D16's client is wired."""
-    return get_default_capp_deletion_client()
+async def get_capp_deletion_client(request: Request) -> CappDeletionClient:
+    """One lazy client per app/loop. Lifespan closes its pool at shutdown."""
+    client = getattr(request.app.state, "capp_client", None)
+    if client is None:
+        # No await between lookup and assignment: concurrent requests on this
+        # loop cannot construct duplicate clients. No cross-loop singleton.
+        client = build_capp_client()
+        request.app.state.capp_client = client
+    return client
 
 
 def get_registry_client() -> RegistryClient:

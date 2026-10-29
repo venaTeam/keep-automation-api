@@ -1,4 +1,7 @@
+
 """deboard_wallet: the cascade fanned out over a tenant's wallet (D18 phase 4)."""
+
+import asyncio
 from uuid import UUID
 
 import pytest
@@ -20,7 +23,12 @@ def world():
 
 def _make(client, engine, world, name, wallet=WALLET, **extra) -> UUID:
     automation_id = UUID(
-        create_built(client, engine, payload={**VALID, "name": name, "namespace": wallet}, **extra)
+        create_built(
+            client,
+            engine,
+            payload={**VALID, "name": name, "namespace": wallet},
+            **extra,
+        )
     )
     seed_external(world, automation_id, wallet)
     return automation_id
@@ -35,7 +43,9 @@ def _set(engine, automation_id, **columns):
         )
 
 
-def test_mixed_children_are_deleted_skipped_and_reported(client, client_as, test_engine, world):
+def test_mixed_children_are_deleted_skipped_and_reported(
+    client, client_as, test_engine, world
+):
     active = _make(client, test_engine, world, "active")
     client.post(f"/automations/{active}/enable")
     inactive = _make(client, test_engine, world, "inactive")
@@ -43,7 +53,7 @@ def test_mixed_children_are_deleted_skipped_and_reported(client, client_as, test
     cascade.begin_delete(TENANT, stuck, "original@keep", deps_for(world).publisher)
     already = _make(client, test_engine, world, "already-deleted")
     cascade.begin_delete(TENANT, already, ACTOR, deps_for(world).publisher)
-    cascade.run_cascade(already, deps_for(world))
+    asyncio.run(cascade.run_cascade(already, deps_for(world)))
     building = _make(client, test_engine, world, "building", build_state="building")
     world.secrets.add((WALLET, "team-secret"))
 
@@ -52,12 +62,19 @@ def test_mixed_children_are_deleted_skipped_and_reported(client, client_as, test
     elsewhere = _make(client, test_engine, world, "elsewhere", wallet="other-wallet")
 
     calls_before = len(world.calls)
-    summary = cascade.deboard_wallet(TENANT, WALLET, ACTOR, deps_for(world))
+    summary = asyncio.run(
+        cascade.deboard_wallet(TENANT, WALLET, ACTOR, deps_for(world))
+    )
 
     assert set(summary.deleted) == {active, inactive, stuck}
     assert summary.skipped_building == (building,)
     assert summary.in_progress == () and summary.failed == ()
-    assert summary.counts() == {"deleted": 3, "in_progress": 0, "skipped_building": 1, "failed": 0}
+    assert summary.counts() == {
+        "deleted": 3,
+        "in_progress": 0,
+        "skipped_building": 1,
+        "failed": 0,
+    }
 
     for automation_id in (active, inactive, stuck, already):
         assert row(test_engine, automation_id).matching_state == "deleted"
@@ -79,39 +96,48 @@ def test_mixed_children_are_deleted_skipped_and_reported(client, client_as, test
 
 def test_building_child_deleted_on_a_later_call(client, test_engine, world):
     building = _make(client, test_engine, world, "building", build_state="building")
-    assert cascade.deboard_wallet(TENANT, WALLET, ACTOR, deps_for(world)).skipped_building == (building,)
+    assert asyncio.run(
+        cascade.deboard_wallet(TENANT, WALLET, ACTOR, deps_for(world))
+    ).skipped_building == (building,)
 
     _set(test_engine, building, build_state="idle")
-    summary = cascade.deboard_wallet(TENANT, WALLET, ACTOR, deps_for(world))
+    summary = asyncio.run(
+        cascade.deboard_wallet(TENANT, WALLET, ACTOR, deps_for(world))
+    )
 
     assert summary.deleted == (building,)
 
 
-def test_one_child_failure_does_not_stop_the_rest_and_resumes(client, test_engine, world):
+def test_one_child_failure_does_not_stop_the_rest_and_resumes(
+    client, test_engine, world
+):
     bad = _make(client, test_engine, world, "bad")
     good = _make(client, test_engine, world, "good")
     deps = deps_for(world)
 
     class FailsForBad:
-        def delete_capp(self, wallet, name):
+        async def delete_capp(self, wallet, name):
             if name == f"automation-{bad}":
                 raise SimulatedFailure("403")
-            deps.capp.delete_capp(wallet, name)
+            await deps.capp.delete_capp(wallet, name)
 
-        def delete_secret(self, wallet, name):
-            deps.capp.delete_secret(wallet, name)
+        async def delete_secret(self, wallet, name):
+            await deps.capp.delete_secret(wallet, name)
 
     flaky = cascade.CascadeDeps(
-        capp=FailsForBad(), registry=deps.registry, git=deps.git, publisher=deps.publisher
+        capp=FailsForBad(),
+        registry=deps.registry,
+        git=deps.git,
+        publisher=deps.publisher,
     )
-    first = cascade.deboard_wallet(TENANT, WALLET, ACTOR, flaky)
+    first = asyncio.run(cascade.deboard_wallet(TENANT, WALLET, ACTOR, flaky))
 
     assert first.deleted == (good,)
     assert first.in_progress == (bad,)
     assert row(test_engine, bad).matching_state == "deleting"
     assert row(test_engine, bad).delete_cascade_step == 1
 
-    second = cascade.deboard_wallet(TENANT, WALLET, ACTOR, deps_for(world))
+    second = asyncio.run(cascade.deboard_wallet(TENANT, WALLET, ACTOR, deps_for(world)))
     assert second.deleted == (bad,)
     assert row(test_engine, bad).matching_state == "deleted"
 
@@ -127,7 +153,9 @@ def test_admission_error_is_isolated_as_failed(monkeypatch, client, test_engine,
         return real(tenant_id, automation_id, actor, publisher)
 
     monkeypatch.setattr(cascade, "begin_delete", flaky_begin)
-    summary = cascade.deboard_wallet(TENANT, WALLET, ACTOR, deps_for(world))
+    summary = asyncio.run(
+        cascade.deboard_wallet(TENANT, WALLET, ACTOR, deps_for(world))
+    )
 
     assert summary.failed == (first,)
     assert summary.deleted == (second,)
@@ -135,16 +163,25 @@ def test_admission_error_is_isolated_as_failed(monkeypatch, client, test_engine,
 
 
 def test_empty_wallet_succeeds(test_engine, world):
-    summary = cascade.deboard_wallet(TENANT, "no-such-wallet", ACTOR, deps_for(world))
-    assert summary.counts() == {"deleted": 0, "in_progress": 0, "skipped_building": 0, "failed": 0}
+    summary = asyncio.run(
+        cascade.deboard_wallet(TENANT, "no-such-wallet", ACTOR, deps_for(world))
+    )
+    assert summary.counts() == {
+        "deleted": 0,
+        "in_progress": 0,
+        "skipped_building": 0,
+        "failed": 0,
+    }
     assert world.calls == []
 
 
 def test_repeat_after_completion_is_a_no_op(client, test_engine, world):
     _make(client, test_engine, world, "one")
-    cascade.deboard_wallet(TENANT, WALLET, ACTOR, deps_for(world))
+    asyncio.run(cascade.deboard_wallet(TENANT, WALLET, ACTOR, deps_for(world)))
     calls = len(world.calls)
-    summary = cascade.deboard_wallet(TENANT, WALLET, ACTOR, deps_for(world))
+    summary = asyncio.run(
+        cascade.deboard_wallet(TENANT, WALLET, ACTOR, deps_for(world))
+    )
     assert summary.counts()["deleted"] == 0
     assert len(world.calls) == calls
 
@@ -152,7 +189,7 @@ def test_repeat_after_completion_is_a_no_op(client, test_engine, world):
 def test_deboard_only_calls_per_automation_capp_operations(client, test_engine, world):
     """No namespace / quota / permission mutation exists in the adapter surface."""
     _make(client, test_engine, world, "one")
-    cascade.deboard_wallet(TENANT, WALLET, ACTOR, deps_for(world))
+    asyncio.run(cascade.deboard_wallet(TENANT, WALLET, ACTOR, deps_for(world)))
     assert set(world.operations()) <= {
         "publish_reload",
         "delete_capp",

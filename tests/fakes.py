@@ -5,6 +5,7 @@ set of fakes built over the same World is a fresh process talking to the same
 CAPP / registry / git. Every call is appended to `world.calls` so tests can
 assert exact cross-adapter ordering.
 """
+
 from dataclasses import dataclass, field
 from uuid import UUID
 
@@ -43,13 +44,13 @@ class FakeCapp:
     def __init__(self, world: World):
         self.world = world
 
-    def delete_capp(self, wallet: str, name: str) -> None:
+    async def delete_capp(self, wallet: str, name: str) -> None:
         self.world.calls.append(("delete_capp", wallet, name))
         self.world.maybe_fail("delete_capp")
         self.world.capps.discard((wallet, name))  # absent = 404 = success
         self.world.maybe_fail("after_delete_capp")
 
-    def delete_secret(self, wallet: str, name: str) -> None:
+    async def delete_secret(self, wallet: str, name: str) -> None:
         self.world.calls.append(("delete_secret", wallet, name))
         self.world.maybe_fail("delete_secret")
         self.world.secrets.discard((wallet, name))
@@ -89,7 +90,9 @@ class FakeGit:
         return sha
 
     def archived(self, automation_id) -> bool:
-        return self.world.git.read_script(archive_marker_path(automation_id)) is not None
+        return (
+            self.world.git.read_script(archive_marker_path(automation_id)) is not None
+        )
 
     def archive_commits(self, automation_id) -> int:
         return self.world.git.commit_log.count(f"archive {automation_id}")
@@ -114,7 +117,13 @@ def deps_for(world: World) -> CascadeDeps:
     )
 
 
-def seed_external(world: World, automation_id, wallet: str, capp_name: str | None = None, digests=("sha256:1", "sha256:2")) -> None:
+def seed_external(
+    world: World,
+    automation_id,
+    wallet: str,
+    capp_name: str | None = None,
+    digests=("sha256:1", "sha256:2"),
+) -> None:
     """Resources a successful deploy would have left behind."""
     world.capps.add((wallet, capp_name or f"automation-{automation_id}"))
     world.secrets.add((wallet, f"automation-{automation_id}-run-auth"))

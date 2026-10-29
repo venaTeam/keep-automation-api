@@ -1,4 +1,7 @@
+
 """DELETE /automations/{id} + exposure-tier guarantees (D18, spec §8.1)."""
+
+import asyncio
 from uuid import UUID, uuid4
 
 import pytest
@@ -88,7 +91,9 @@ def test_repeated_delete_reports_progress_and_starts_no_attempt(
     assert reload_publisher.count == 1
     assert row(test_engine, automation_id).matching_state == "deleting"
     assert row(test_engine, automation_id).updated_by == "noauth@keep"
-    assert [r.action for r in revisions(test_engine, automation_id)].count("delete") == 1
+    assert [r.action for r in revisions(test_engine, automation_id)].count(
+        "delete"
+    ) == 1
 
 
 def test_stopped_cascade_is_resumed_by_the_reconciler_path_not_delete(
@@ -99,7 +104,7 @@ def test_stopped_cascade_is_resumed_by_the_reconciler_path_not_delete(
     client.delete(f"/automations/{automation_id}")
     assert row(test_engine, automation_id).matching_state == "deleting"
 
-    result = cascade.resume_delete(UUID(automation_id), deps_for(world))
+    result = asyncio.run(cascade.resume_delete(UUID(automation_id), deps_for(world)))
 
     assert result.completed
     resp = client.delete(f"/automations/{automation_id}")
@@ -107,7 +112,9 @@ def test_stopped_cascade_is_resumed_by_the_reconciler_path_not_delete(
     assert resp.json()["matching_state"] == "deleted"
 
 
-def test_delete_while_building_is_409_with_no_side_effects(client, test_engine, world, reload_publisher):
+def test_delete_while_building_is_409_with_no_side_effects(
+    client, test_engine, world, reload_publisher
+):
     created = client.post("/automations", json=VALID).json()
 
     resp = client.delete(f"/automations/{created['id']}")
@@ -123,7 +130,9 @@ def test_delete_unknown_is_404(client):
     assert client.delete(f"/automations/{uuid4()}").status_code == 404
 
 
-def test_delete_other_tenants_automation_is_404_and_untouched(client_as, test_engine, world):
+def test_delete_other_tenants_automation_is_404_and_untouched(
+    client_as, test_engine, world
+):
     automation_id = create_built(client_as(OTHER_TENANT), test_engine)
     resp = client_as(TENANT).delete(f"/automations/{automation_id}")
     assert resp.status_code == 404
@@ -131,7 +140,9 @@ def test_delete_other_tenants_automation_is_404_and_untouched(client_as, test_en
     assert world.calls == []
 
 
-def test_delete_active_automation_stops_matching_first(client, test_engine, world, reload_publisher):
+def test_delete_active_automation_stops_matching_first(
+    client, test_engine, world, reload_publisher
+):
     automation_id = create_built(client, test_engine)
     client.post(f"/automations/{automation_id}/enable")
     world.failures["delete_capp"] = -1  # CAPP down: cascade parks at step 1

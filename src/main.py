@@ -3,6 +3,7 @@
 D12 skeleton: wires the three exposure tiers (user / machine / internal) plus the
 SSE stub and health check. Routes are stubs — no business logic yet (D13–D20).
 """
+
 import logging
 from contextlib import asynccontextmanager
 
@@ -42,8 +43,14 @@ async def lifespan(app: FastAPI):
         db_core.redacted_database_url(),
         config.DATABASE_URL_SOURCE,
     )
-    yield
-    logger.info("Shutting down keep-automation-api")
+    try:
+        yield
+    finally:
+        capp_client = getattr(app.state, "capp_client", None)
+        if capp_client is not None:
+            await capp_client.aclose()
+            del app.state.capp_client
+        logger.info("Shutting down keep-automation-api")
 
 
 def get_app() -> FastAPI:

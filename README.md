@@ -9,8 +9,8 @@ custodies the single CAPP service identity.
 > The FastAPI shell, the three exposure-tier routers, authoring CRUD,
 > enable/disable and the delete cascade
 > are in place; submit, the CI webhook, the reconciler and SSE payloads are still
-> stubs (D14–D17, D19–D20). The cascade's CAPP adapter remains a D16
-> dependency; the D18 Artifactory adapter uses A0 configuration and fails closed
+> stubs (D15, D17, D19–D20). The cascade uses D16's async CAPP adapter;
+> the D18 Artifactory adapter uses A0 configuration and fails closed
 > when that configuration is absent — see "Lifecycle" below.
 
 ## Database
@@ -87,7 +87,7 @@ Git I/O never runs inside a DB transaction or under a row lock:
   restores the previous build state.
 - Every row-lock acquisition waits at most `DATABASE_LOCK_TIMEOUT_MS` (2000);
   past that the request is `503` + `Retry-After: 1`, never a statement-timeout
-  500. Code that later adds CAPP/git calls (D15/D16) must keep this shape:
+  500. New CAPP/git callers must keep this shape:
   claim, call with no session, finish.
 
 ## Lifecycle (D18)
@@ -125,8 +125,11 @@ CronJob) continues a stopped cascade. Checkpoints are compare-and-set,
 so concurrent runners are safe. The team Secret named by `secret_name`, the row,
 revisions, runs and script bytes are never deleted.
 
-**Adapters.** `CappDeletionClient` is the narrow cascade interface that D16's
-general CAPP client must implement. `ArtifactoryRegistryClient` enumerates and
+**Adapters.** `CappDeletionClient` is the async cascade interface implemented by
+D16's general CAPP client. The cascade awaits CAPP directly and runs database,
+Git, registry, and reload work in worker threads. Call `await cascade.resume_delete(...)`
+and `await cascade.deboard_wallet(...)` from async callers. The app owns and closes
+the shared HTTP connection pool. `ArtifactoryRegistryClient` enumerates and
 deletes all artifacts below the automation's configured image path; it uses A0's
 Artifactory URL, repository, prefix, and credentials. Missing configuration
 fails closed, so a DELETE never reports resources removed when they were not.
@@ -195,6 +198,11 @@ stand-in — see the note at the top of `tests/conftest.py`.
 ## Deferred
 
 - Business endpoints (submit, reconciler, CI webhook, runs, SSE payloads) — **D14–D17, D19–D20**.
-- Real CAPP deletion client + run-auth key column (**D16/F24**), A0 Artifactory deployment configuration, and git archive adapter (**D14**).
+- Run-auth key column (**F24**), A0 Artifactory deployment configuration, and git archive adapter (**D14**).
 - Deploy + NetworkPolicy manifests — handled out-of-repo (A0 infra).
 - Real identity-provider integration + tier token verification.
+# CAPP integration (D16)
+
+See [the CAPP adapter guide](docs/d16-capp-client.md) for service-secret
+configuration, trusted wallet mapping, rollout/deletion interfaces, sanitized
+errors, and the opt-in dev hello acceptance test.
