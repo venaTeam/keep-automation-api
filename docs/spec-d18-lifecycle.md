@@ -52,11 +52,58 @@ D18 is a Wave 4 story of the Automations feature (`keep-automations-jira-stories
 ### Non-functional requirements
 
 - **Resumability:** correctness comes from the DB checkpoint, not the in-process task. Two runners on the same row (different replicas) may repeat a step but never move the checkpoint backward or skip a step — compare-and-set updates, not a Python lock.
-- **Blocking I/O:** every CAPP/registry/git call has an explicit timeout, runs off the event loop, and never holds a pooled DB connection or the automation row lock (ADR-008 pattern). Exclusivity across I/O is a durable claim (`build_state=building` + deadline), not a held lock — authoring create/edit follow this too, so D14's real git client drops in unchanged.
+- **I/O:** CAPP calls are awaited asynchronously; blocking registry/Git calls and DB transactions run in worker threads. External calls have explicit timeouts and never hold a pooled DB connection or the automation row lock (ADR-008 pattern). Exclusivity across I/O is a durable claim (`build_state=building` + deadline), not a held lock — authoring create/edit follow this too, so D14's real git client drops in unchanged.
 - **Bounded lock waits:** every row-lock acquisition waits at most `DATABASE_LOCK_TIMEOUT_MS` (2000 ms); past it the request is `503` + `Retry-After`, never a statement-timeout `500`.
 - **Credential hygiene:** the API key never appears in logs, errors, traces, responses, or audit rows.
 - **Least surprise for teams:** D18 never changes wallet namespaces, quotas, or permissions, and never deletes a Secret the team owns.
 - **Reload:** a lost `reload` publish is tolerated — B4's unconditional 30s reload converges.
+
+
+## Agent implementation guide
+
+Start with these files before changing lifecycle behavior:
+
+- `src/bl/lifecycle.py`: enable/disable transitions.
+- `src/bl/cascade.py`: deletion admission, five async cascade steps, checkpoints,
+  resume, and tenant-scoped deboarding.
+- `src/bl/cascade_adapters.py`: external adapter interfaces and resource naming.
+- `src/bl/capp_client.py`: async Capp and run-auth Secret operations.
+- `src/api/routes/user/lifecycle_routes.py`: user-facing lifecycle routes.
+
+The implementation phases below describe the original design, not a list of
+missing files. Check the current source before adding an implementation or
+assuming a dependency is complete.
+
+Current integration details:
+
+- Every cascade step has an async interface. The runner awaits each step; the
+  step offloads its own blocking work. Never wrap native async CAPP calls in a
+  worker thread or hold a DB session across an external call.
+- `CAPP_CLUSTER` is the default cluster for wallet-name calls. Wallet onboarding
+  and tenant authorization are outside the D16 client; there is no wallet allowlist.
+- CAPP URLs use names, not returned UIDs. `capp_name_for` supports legacy stored
+  names and resolves UID-based deployments to `automation-{id}`.
+- The run-auth Secret is always `automation-{id}-run-auth`; never delete the
+  team's `secret_name`. Step 2 clears `run_api_key_encrypted` only when that ORM
+  column exists. This conditional hook does not prove the migration or key
+  creation flow has been delivered.
+- Repeatable cleanup plus compare-and-set checkpoints provide crash recovery.
+  A successful external call followed by a failed checkpoint must be safe to repeat.
+- Deboarding processes every matching tenant/wallet automation, without an
+  authoring-list limit. It skips building children and isolates child failures.
+
+Verification to preserve when editing:
+
+- Interrupt after each cascade step and between Capp deletion, Secret deletion,
+  and checkpoint 2; resume with a fresh runner and verify ordering and convergence.
+- Exercise lost checkpoints, adapter failures, concurrent resumes, cross-tenant
+  access, and build/delete races. Never advance past failed cleanup.
+- Verify deletion-aware run finalization preserves committed success and avoids
+  ordinary failure notifications or retries for deletion-terminated executions.
+- Use `tests/test_cascade_async.py` for event-loop and worker-thread boundaries;
+  DB-backed lifecycle/cascade tests are also needed for transactional changes.
+- Mocked tests do not establish live CAPP cleanup, applied migrations, or B4
+  reload integration. Report those acceptance checks separately.
 
 ## Proposed Implementation
 
