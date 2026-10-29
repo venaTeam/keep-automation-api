@@ -117,7 +117,9 @@ async def test_readiness(ready):
 
 async def test_rollout_preserves_full_spec_and_does_not_change_input():
     current = capp(
-        secretVolumes=[{"secretName": "team-secret"}],
+        secretVolumes=[
+            {"name": "team-data", "secretName": "team-secret", "mountPath": "/secrets"}
+        ],
         env=[{"name": "A", "value": "B"}],
         labels={"server": "owned"},
     )
@@ -612,3 +614,46 @@ async def test_empty_custom_resources_replaces_existing_size():
     )
     assert wire.calls[-1][2]["customResources"] == {}
     assert "size" not in wire.calls[-1][2]
+
+
+@pytest.mark.parametrize(
+    "existing",
+    [
+        {"env": "wrong format"},
+        {"env": [{"name": "KEY", "value": 42}]},
+        {"secretVolumes": [{"secretName": "team-secret"}]},
+        {"scaleSpec": {"minReplicas": "1"}},
+        {"size": None, "resources": {"requests": {"cpu": 2}}},
+        {"size": "small", "customResources": {}},
+    ],
+)
+async def test_rollout_rejects_malformed_existing_config_without_put(existing):
+    adapter, wire = client(
+        [(HTTPStatus.OK, tokens()), (HTTPStatus.OK, capp(**existing))]
+    )
+    with pytest.raises(CappError) as caught:
+        await adapter.update_capp("team", NAME, CappRequest(NAME, NEXT_IMAGE))
+    assert caught.value.code is CappErrorCode.MALFORMED_RESPONSE
+    assert caught.value.__context__ is None
+    assert [call[0] for call in wire.calls] == ["POST", "GET"]
+
+
+async def test_rollout_checks_configuration_after_merge():
+    # Array replacements remain intact while the final request is validated.
+    existing = {"eventSourcesSpec": {"sources": []}}
+    adapter, wire = client(
+        [
+            (HTTPStatus.OK, tokens()),
+            (HTTPStatus.OK, capp(**existing)),
+            (HTTPStatus.OK, capp(image=NEXT_IMAGE)),
+        ]
+    )
+    config = {
+        "eventSourcesSpec": {
+            "sources": [
+                {"name": "ping", "pingSourceConfiguration": {"schedule": "* * * * *"}}
+            ]
+        }
+    }
+    await adapter.update_capp("team", NAME, CappRequest(NAME, NEXT_IMAGE, config))
+    assert wire.calls[-1][2]["eventSourcesSpec"] == config["eventSourcesSpec"]

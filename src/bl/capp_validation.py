@@ -186,12 +186,18 @@ def encode_request(body: dict | None) -> bytes | None:
     raise CappError(CappErrorCode.INVALID_REQUEST)
 
 
-def validate_config(config: dict) -> None:
-    # Validate the original wire data; never send Pydantic's coerced/default values.
-    encode_request(config)
+def validate_config(
+    config: dict, *, error_code: CappErrorCode = CappErrorCode.INVALID_REQUEST
+) -> None:
+    # Validate original wire data, preserving omitted fields and explicit nulls.
+    # Upstream settings use MALFORMED_RESPONSE; caller input uses INVALID_REQUEST.
     try:
+        encode_request(config)
         DeploymentConfig.parse_obj(config)
+        if config.get("size") is not None and config.get("customResources") is not None:
+            raise ValueError("conflicting sizing")
         return
-    except (ValidationError, TypeError, ValueError):
+    except (CappError, ValidationError, TypeError, ValueError):
         pass
-    raise CappError(CappErrorCode.INVALID_REQUEST)
+    # Do not retain validation exceptions containing input or response values.
+    raise CappError(error_code)
