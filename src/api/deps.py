@@ -13,9 +13,11 @@ from src.bl.cascade import CascadeDeps
 from src.bl.cascade_adapters import (
     CappDeletionClient,
     RegistryClient,
+    UnconfiguredCappDeletionClient,
     build_capp_client,
     get_default_registry_client,
 )
+from src.bl.capp_errors import CappError
 from src.bl.git_client import GitClient, build_gitlab_client
 from src.core.reload import ReloadPublisher, get_default_reload_publisher
 from src.exceptions import LifecycleAuthenticationNotConfiguredError
@@ -49,7 +51,13 @@ async def get_capp_deletion_client(request: Request) -> CappDeletionClient:
     if client is None:
         # No await between lookup and assignment: concurrent requests on this
         # loop cannot construct duplicate clients. No cross-loop singleton.
-        client = build_capp_client()
+        try:
+            client = build_capp_client()
+        except CappError:
+            # Admit deletion even when CAPP settings are unavailable. The cascade
+            # will retain checkpoint 1 and report failure at its CAPP step.
+            # Do not cache the fallback: later dependency resolution can recover.
+            return UnconfiguredCappDeletionClient()
         request.app.state.capp_client = client
     return client
 

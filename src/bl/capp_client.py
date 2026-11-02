@@ -206,7 +206,6 @@ class CappClient:
     ) -> SecretResource:
         path = self._secret_path(target, name)
         body = {"data": self._secret_data(spec.data)}
-        await self.get_secret(target, name)
         return parse_secret(
             await self._transport.request(HTTPMethod.PUT, path, body),
             self._target(target).wallet_name,

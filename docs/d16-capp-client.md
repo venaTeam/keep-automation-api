@@ -89,7 +89,13 @@ digest on failure, and let the reconciler inspect ambiguous mutations before
 retrying. CAPP owns traffic switching and retaining the old serving revision.
 The local mocked tests cannot prove that external traffic behavior.
 
-D18's default deletion dependency now constructs this client. Deletes accept
+D18's default deletion dependency constructs this client when configuration is
+valid. Missing or invalid CAPP settings return an unconfigured deletion adapter,
+so deletion can stop matching and commit checkpoint 1. Cleanup then stops at the
+CAPP step for a later reconciler retry. The fallback is not cached; a later
+dependency resolution can construct the real client after settings are corrected.
+Only successfully constructed clients are cached and closed during shutdown.
+Deletes accept
 both 204 and 404. `capp_name_for` supports legacy name-valued deployment IDs and
 new UID-valued IDs, using the deterministic name for the latter. Secret methods
 accept only `automation-<UUID>-run-auth`; team Secret references are never
@@ -101,7 +107,7 @@ existing synchronous Git/registry/reload adapters run in worker threads. No DB
 session crosses a CAPP await. Cancellation propagates and leaves the last durable
 checkpoint for a later retry; it is not converted to success or retried inline.
 
-Secret updates GET first, then replace the entire `data` map; omitted keys are
+Secret updates use a single PUT to replace the entire `data` map; omitted keys are
 removed. Secret results expose identity/version only, never data. Capp results
 expose name, UID, URL, image, conditions and version, without raw response JSON,
 environment values, annotations or freeform condition messages.

@@ -201,7 +201,6 @@ async def test_secret_crud_replaces_all_data_and_excludes_values_from_results():
             (HTTPStatus.CREATED, secret()),
             (HTTPStatus.OK, secret()),
             (HTTPStatus.OK, secret()),
-            (HTTPStatus.OK, secret()),
             (HTTPStatus.NO_CONTENT, {}),
         ]
     )
@@ -219,7 +218,7 @@ async def test_secret_crud_replaces_all_data_and_excludes_values_from_results():
         PATH + "secrets",
         {"name": SECRET, "type": "Opaque", "data": spec.data},
     )
-    assert wire.calls[4][:3] == (
+    assert wire.calls[3][:3] == (
         "PUT",
         PATH + "secrets/" + SECRET,
         {"data": {"new": "replacement-sensitive"}},
@@ -228,6 +227,7 @@ async def test_secret_crud_replaces_all_data_and_excludes_values_from_results():
     assert "secret-sensitive" not in repr(result) + repr(spec)
     assert not hasattr(result, "data")
     assert result.resource_version == "43"
+    assert [call[0] for call in wire.calls] == ["POST", "POST", "GET", "PUT", "DELETE"]
 
 
 @pytest.mark.parametrize("status", [HTTPStatus.NO_CONTENT, HTTPStatus.NOT_FOUND])
@@ -258,7 +258,7 @@ async def test_delete_idempotent(status, kind, name):
         (lambda c: c.get_secret("team", SECRET), []),
         (
             lambda c: c.update_secret("team", SECRET, SecretUpdateRequest({})),
-            [(HTTPStatus.OK, secret())],
+            [],
         ),
         (lambda c: c.delete_secret("team", SECRET), []),
     ],
@@ -657,3 +657,13 @@ async def test_rollout_checks_configuration_after_merge():
     }
     await adapter.update_capp("team", NAME, CappRequest(NAME, NEXT_IMAGE, config))
     assert wire.calls[-1][2]["eventSourcesSpec"] == config["eventSourcesSpec"]
+
+
+async def test_secret_update_reports_missing_secret_from_put_without_preflight():
+    adapter, wire = client([(HTTPStatus.OK, tokens()), (HTTPStatus.NOT_FOUND, {})])
+    with pytest.raises(CappError) as caught:
+        await adapter.update_secret(
+            "team", SECRET, SecretUpdateRequest({"key": "value"})
+        )
+    assert caught.value.code is CappErrorCode.NOT_FOUND
+    assert [call[0] for call in wire.calls] == ["POST", "PUT"]

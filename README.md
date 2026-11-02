@@ -195,14 +195,15 @@ DB-backed tests stand up a disposable Postgres (`tests/docker-compose.test.yml`)
 and build the schema from this repo's ORM metadata plus a minimal `tenant`
 stand-in — see the note at the top of `tests/conftest.py`.
 
+## CAPP integration (D16)
+
+See [the CAPP adapter guide](docs/d16-capp-client.md) for service-secret
+configuration, caller-supplied wallet targets, rollout/deletion interfaces, sanitized
+errors, and the opt-in dev hello acceptance test.
+
 ## Deferred
 
 - Business endpoints (submit, reconciler, CI webhook, runs, SSE payloads) — **D14–D17, D19–D20**.
 - Run-auth key column (**F24**), A0 Artifactory deployment configuration, and git archive adapter (**D14**).
 - Deploy + NetworkPolicy manifests — handled out-of-repo (A0 infra).
 - Real identity-provider integration + tier token verification.
-# CAPP integration (D16)
-
-See [the CAPP adapter guide](docs/d16-capp-client.md) for service-secret
-configuration, trusted wallet mapping, rollout/deletion interfaces, sanitized
-errors, and the opt-in dev hello acceptance test.
