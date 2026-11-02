@@ -65,6 +65,10 @@ class RedisReloadPublisher:
                         self._url,
                         socket_timeout=self._timeout,
                         socket_connect_timeout=self._timeout,
+                        # Cutovers are rare, so the pooled socket idles; an
+                        # idle connection a NAT/LB dropped silently would
+                        # otherwise time out the next reload. Ping before reuse.
+                        health_check_interval=30,
                     )
             return self._client
 

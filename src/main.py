@@ -7,12 +7,18 @@ import logging
 from contextlib import asynccontextmanager
 
 from dotenv import find_dotenv, load_dotenv
+
+# Before any `src` import: `src.config` reads os.environ at import time, so a
+# .env loaded after it would reach os.environ but never the settings.
+load_dotenv(find_dotenv())
+
 from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from src import config
+from src.api.ci_webhook_guard import CiWebhookGuard
 from src.exceptions import (
     AutomationBuildingError,
     AutomationBusyError,
@@ -20,13 +26,33 @@ from src.exceptions import (
     AutomationLifecycleConflictError,
     AutomationNotFoundError,
     AutomationValidationError,
+    BuildNotRecordedError,
+    CappUnavailableError,
     LifecycleAuthenticationNotConfiguredError,
     ScriptRepoUnavailableError,
 )
 
-load_dotenv(find_dotenv())
+
+def resolve_log_level(name: str) -> int | None:
+    """The numeric level for `name`, or None when it is not a level name."""
+    level = logging.getLevelName(name.upper())
+    return level if isinstance(level, int) else None
+
+
+# Root handler + level. Without it Python's last-resort handler prints only
+# WARNING+, so every INFO line (DB target, build cutovers) vanished in the
+# container. `force` is not set: a host that configured logging first wins.
+# An unknown LOG_LEVEL falls back to INFO: basicConfig would raise at import
+# and crash-loop every worker over a typo.
+_log_level = resolve_log_level(config.LOG_LEVEL)
+logging.basicConfig(
+    level=_log_level if _log_level is not None else logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
 
 logger = logging.getLogger(__name__)
+if _log_level is None:
+    logger.warning("LOG_LEVEL=%r is not a logging level; using INFO", config.LOG_LEVEL)
 
 
 @asynccontextmanager
@@ -42,6 +68,18 @@ async def lifespan(app: FastAPI):
         db_core.redacted_database_url(),
         config.DATABASE_URL_SOURCE,
     )
+    # The CI webhook fails closed on both settings; say so once at startup so
+    # a misprovisioned pod is visible before CI's first red job.
+    if not config.CI_WEBHOOK_TOKEN:
+        logger.warning("CI_WEBHOOK_TOKEN is not set: every CI webhook will be rejected (401)")
+    from src.bl.builds import configured_image_repository
+
+    if configured_image_repository() is None:
+        logger.warning(
+            "AUTOMATION_IMAGE_REPOSITORY is unset or not a valid lowercase "
+            "docker repository: every successful CI build will be refused (503) "
+            "and stay building"
+        )
     yield
     logger.info("Shutting down keep-automation-api")
 
@@ -53,6 +91,9 @@ def get_app() -> FastAPI:
         version=config.KEEP_VERSION,
         lifespan=lifespan,
     )
+
+    # Token + size check for the CI webhook before its body is read (D15).
+    app.add_middleware(CiWebhookGuard)
 
     app.add_middleware(
         CORSMiddleware,
@@ -141,6 +182,19 @@ def get_app() -> FastAPI:
             },
         )
 
+    @app.exception_handler(BuildNotRecordedError)
+    async def build_not_recorded_handler(
+        request: Request, exc: BuildNotRecordedError
+    ) -> JSONResponse:
+        # CAPP accepted the image but the DB write failed and nothing was
+        # written; normally a redelivery completes it (see the exception).
+        # Cause text never echoed.
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            headers={"Retry-After": "1"},
+            content={"detail": "Build result could not be recorded; retry shortly"},
+        )
+
     @app.exception_handler(AutomationBusyError)
     async def automation_busy_handler(
         request: Request, exc: AutomationBusyError
@@ -190,6 +244,19 @@ def get_app() -> FastAPI:
         return JSONResponse(
             status_code=503,
             content={"detail": "Script repository is unavailable; retry shortly"},
+        )
+
+    @app.exception_handler(CappUnavailableError)
+    async def capp_unavailable_handler(
+        request: Request, exc: CappUnavailableError
+    ) -> JSONResponse:
+        # A CAPP deploy/rollout failed before the cutover committed: the row is
+        # unchanged (normally `building` under its lock) and the old digest keeps
+        # serving, so the webhook is safe to redeliver. The exception text is never echoed
+        # (it must not, but could, carry CAPP identity detail — spec §3.4).
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "Execution platform is unavailable; retry shortly"},
         )
 
     # Health / root
