@@ -55,14 +55,15 @@ def _conditions(payload: JsonObject) -> tuple[CappCondition, ...]:
         source = _optional_string(item, "source")
         if condition_status not in _CONDITION_STATUSES:
             raise CappError(CappErrorCode.MALFORMED_RESPONSE)
-        if source is not None and source not in _CONDITION_SOURCES:
-            raise CappError(CappErrorCode.MALFORMED_RESPONSE)
         # Freeform reason/message can echo secrets. Deliberately omit them.
         conditions.append(
             CappCondition(
                 type=condition_type,
                 status=ConditionStatus(condition_status),
-                source=ConditionSource(source) if source is not None else None,
+                # Source is informational and is not a closed enum in caap.yaml.
+                source=(
+                    ConditionSource(source) if source in _CONDITION_SOURCES else source
+                ),
             )
         )
     return tuple(conditions)

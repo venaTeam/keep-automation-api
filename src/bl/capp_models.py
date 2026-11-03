@@ -49,7 +49,7 @@ class SecretUpdateRequest:
 class CappCondition:
     type: str
     status: ConditionStatus
-    source: ConditionSource | None = None
+    source: ConditionSource | str | None = None
 
 
 @dataclass(frozen=True)

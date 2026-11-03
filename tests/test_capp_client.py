@@ -667,3 +667,59 @@ async def test_secret_update_reports_missing_secret_from_put_without_preflight()
         )
     assert caught.value.code is CappErrorCode.NOT_FOUND
     assert [call[0] for call in wire.calls] == ["POST", "PUT"]
+
+
+@pytest.mark.parametrize(
+    "config,expected_state", [({}, "disabled"), ({"state": "enabled"}, "enabled")]
+)
+async def test_rollout_accepts_disabled_platform_state(config, expected_state):
+    adapter, wire = client(
+        [
+            (HTTPStatus.OK, tokens()),
+            (HTTPStatus.OK, capp(state="disabled")),
+            (HTTPStatus.OK, capp(state=expected_state, image=NEXT_IMAGE)),
+        ]
+    )
+    await adapter.update_capp("team", NAME, CappRequest(NAME, NEXT_IMAGE, config))
+    assert wire.calls[-1][0] == "PUT"
+    assert wire.calls[-1][2]["state"] == expected_state
+    assert wire.calls[-1][2]["image"] == NEXT_IMAGE
+
+
+@pytest.mark.parametrize("operation", ["create", "get", "update"])
+async def test_unknown_condition_source_is_preserved(operation):
+    response = capp(
+        status={
+            "conditions": [
+                {"type": "Ready", "status": "True", "source": "future-subsystem"}
+            ]
+        }
+    )
+    replies = [(HTTPStatus.OK, tokens())]
+    if operation == "update":
+        replies.append((HTTPStatus.OK, response))
+    replies.append(
+        (HTTPStatus.CREATED if operation == "create" else HTTPStatus.OK, response)
+    )
+    adapter, _ = client(replies)
+    if operation == "create":
+        result = await adapter.create_capp("team", CappRequest(NAME, IMAGE))
+    elif operation == "update":
+        result = await adapter.update_capp("team", NAME, CappRequest(NAME, IMAGE))
+    else:
+        result = await adapter.get_capp("team", NAME)
+    assert result.conditions[0].source == "future-subsystem"
+    assert result.conditions[0].status is ConditionStatus.TRUE
+
+
+@pytest.mark.parametrize("source", ["future-subsystem", None])
+async def test_unknown_source_does_not_relax_readiness_status_validation(source):
+    response = capp(
+        status={
+            "conditions": [{"type": "Ready", "status": "invalid", "source": source}]
+        }
+    )
+    adapter, _ = client([(HTTPStatus.OK, tokens()), (HTTPStatus.OK, response)])
+    with pytest.raises(CappError) as caught:
+        await adapter.get_capp("team", NAME)
+    assert caught.value.code is CappErrorCode.MALFORMED_RESPONSE

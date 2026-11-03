@@ -81,7 +81,9 @@ is no t-shirt size. Selecting a size/custom resources removes the other choice.
 The backend preserves metadata and fetches `resourceVersion` internally, as
 documented in `caap.yaml`; the wire schema has no client-side version precondition.
 Therefore the client cannot guarantee compare-and-swap against its earlier GET.
-Callers must serialize rollouts. A returned 409 is a typed conflict, never retried.
+Existing Capps may be enabled or disabled. An omitted state preserves the current
+state; explicitly requesting enabled re-enables a disabled Capp. Explicit disable
+requests remain rejected by this client. Callers must serialize rollouts. A returned 409 is a typed conflict, never retried.
 
 An accepted PUT is **not** readiness confirmation. D15/F25 must inspect the
 requested image and Ready conditions, retain the build lock and old active
@@ -136,8 +138,9 @@ mutation**. Inspect a resource after ambiguous create/update outcomes.
 Errors exclude upstream messages, request/response bodies and transport
 exception chains. No client logging or tracing contains credentials or data.
 
-Readiness status and source use `ConditionStatus` and `ConditionSource` enums.
-These and `CappErrorCode` are string enums, preserving string comparisons and
+Readiness status uses the strict `ConditionStatus` enum. Known sources use
+`ConditionSource`; unknown source strings are preserved as informational text.
+The enums, including `CappErrorCode`, preserve string comparisons and
 JSON wire values. Response parsing validates nested objects, scalar types, and
 enum values before constructing result models. HTTP failures share the same
 classification for authentication and resource calls, including transient

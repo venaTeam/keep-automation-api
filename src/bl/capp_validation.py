@@ -161,7 +161,8 @@ class EventSources(WireModel):
 
 class DeploymentConfig(WireModel):
     scaleSpec: Scale | None = None
-    state: Literal["enabled"] | None = None
+    # Both are valid platform states. CappClient restricts explicit caller input.
+    state: Literal["enabled", "disabled"] | None = None
     containerName: StrictStr | None = None
     size: Literal["small", "medium", "large"] | None = None
     customResources: Resources | None = None
