@@ -723,3 +723,41 @@ async def test_unknown_source_does_not_relax_readiness_status_validation(source)
     with pytest.raises(CappError) as caught:
         await adapter.get_capp("team", NAME)
     assert caught.value.code is CappErrorCode.MALFORMED_RESPONSE
+
+
+@pytest.mark.parametrize("operation", ["create", "get", "update"])
+async def test_username_in_resource_identifiers_and_annotations_is_not_a_secret(
+    operation,
+):
+    username = "keep-automation"
+    image = "registry/keep-automation-scripts/example@sha256:" + "a" * 64
+    response = capp(
+        image=image,
+        labels={"keep-automation/owner": username},
+        annotations={"requester": username},
+    )
+    replies = [(HTTPStatus.OK, tokens())]
+    if operation == "update":
+        replies.append((HTTPStatus.OK, response))
+    replies.append(
+        (HTTPStatus.CREATED if operation == "create" else HTTPStatus.OK, response)
+    )
+    wire = Wire(replies)
+    async with CappClient(
+        base_url="https://capp.example",
+        username=username,
+        password=IDENTITY[1],
+        cluster="dev",
+        timeout_seconds=7,
+        transport=httpx.MockTransport(wire),
+        clock=lambda: NOW,
+    ) as adapter:
+        if operation == "create":
+            result = await adapter.create_capp("team", CappRequest(NAME, image))
+        elif operation == "update":
+            result = await adapter.update_capp("team", NAME, CappRequest(NAME, image))
+        else:
+            result = await adapter.get_capp("team", NAME)
+    assert result.image == image
+    assert not wire.replies
+    assert not hasattr(result, "annotations")

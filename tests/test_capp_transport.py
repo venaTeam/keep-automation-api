@@ -145,10 +145,14 @@ async def test_login_timeout_is_sanitized():
     assert sum(call[1].endswith("/login") for call in wire.calls) == 1
 
 
-@pytest.mark.parametrize("credential", IDENTITY)
-async def test_success_body_cannot_reflect_identity_to_callers(credential):
+@pytest.mark.parametrize("credential", IDENTITY[1:])
+@pytest.mark.parametrize("in_key", [False, True])
+async def test_success_body_cannot_reflect_credentials_to_callers(credential, in_key):
+    reflected = (
+        {"echo:" + credential: "value"} if in_key else {"value": "echo:" + credential}
+    )
     adapter, _ = client(
-        [(HTTPStatus.OK, tokens()), (HTTPStatus.OK, capp(uid="echo:" + credential))]
+        [(HTTPStatus.OK, tokens()), (HTTPStatus.OK, {"nested": [reflected]})]
     )
     with pytest.raises(CappError, match="malformed_response") as caught:
         (await adapter.request(HTTPMethod.GET, "/" + NAME))

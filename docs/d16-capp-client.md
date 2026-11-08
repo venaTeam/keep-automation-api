@@ -10,7 +10,7 @@ or invokes `/run`.
 
 - `capp_client.py` checks target URL syntax and builds resource requests.
 - `capp_transport.py` owns the HTTP pool, authentication, token refresh, deadlines,
-  status handling, and rejection of responses that echo identity material.
+  status handling, and rejection of responses that echo passwords or tokens.
 - `capp_responses.py` validates responses and produces typed resource results.
 - `capp_validation.py` validates nested request fields against the supplied CAPP
   contract without coercing values or filling omitted update fields. Invalid
@@ -135,6 +135,10 @@ malformed_response, invalid_target, invalid_request, and configuration.
 `CappAuthenticationError` and `CappConflictError` specialize the relevant codes.
 `retryable` describes a transient failure, **not permission to blindly replay a
 mutation**. Inspect a resource after ambiguous create/update outcomes.
+Usernames are identifiers and may legitimately appear in resource paths or platform
+annotations, so they are not used as response substring filters. Passwords and
+tokens remain checked in response keys and values, including tokens retained
+across concurrent refreshes.
 Errors exclude upstream messages, request/response bodies and transport
 exception chains. No client logging or tracing contains credentials or data.
 

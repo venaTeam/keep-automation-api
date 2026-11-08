@@ -198,9 +198,12 @@ class CappTransport:
     def _contains_identity(
         self, value: object, request_tokens: tuple[str, ...]
     ) -> bool:
-        """Do not expose identity material echoed in an otherwise valid body."""
+        """Reject echoed passwords/tokens, including those used before refresh.
+
+        A username is an identifier that may legitimately occur in image paths,
+        namespaces or platform annotations; it is not a secret substring marker.
+        """
         secrets = (
-            self._username,
             self._password,
             self._access_token,
             self._refresh_token,
