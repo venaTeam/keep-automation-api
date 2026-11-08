@@ -28,13 +28,14 @@ def capp_name_for(automation_id: UUID, capp_deployment_id: str | None) -> str:
     Retain compatibility with rows that stored the name before D16. A UID
     needs the deterministic name used by the deployment coordinator.
     """
-    if capp_deployment_id:
-        try:
-            UUID(capp_deployment_id)
-        except ValueError:
-            return capp_deployment_id
-        return f"automation-{automation_id}"
-    return capp_deployment_id or f"automation-{automation_id}"
+    name = f"automation-{automation_id}"
+    if not capp_deployment_id:
+        return name
+    try:
+        UUID(capp_deployment_id)
+    except ValueError:
+        return capp_deployment_id  # Legacy rows stored the resource name.
+    return name
 
 
 def run_auth_secret_name(automation_id: UUID) -> str:

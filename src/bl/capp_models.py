@@ -2,7 +2,9 @@
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any
+from typing import Any, TypeAlias
+
+JsonObject: TypeAlias = dict[str, Any]
 
 
 class ConditionStatus(StrEnum):
@@ -30,14 +32,13 @@ class CappRequest:
     image: str
     # CAPP wire field names; omitted fields are preserved on update. Lists
     # replace in full, dictionaries merge recursively (including explicit null).
-    config: dict[str, Any] = field(default_factory=dict, repr=False)
+    config: JsonObject = field(default_factory=dict, repr=False)
 
 
 @dataclass(frozen=True)
 class SecretRequest:
     name: str
     data: dict[str, str] = field(repr=False)
-    type: str = "Opaque"
 
 
 @dataclass(frozen=True)

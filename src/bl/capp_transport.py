@@ -6,16 +6,14 @@ import math
 from collections.abc import Callable
 from datetime import datetime, timezone
 from http import HTTPMethod, HTTPStatus
-from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
 
 from src.bl.capp_errors import CappError, CappErrorCode, error_for_status
 from src.bl.capp_responses import required_string
-from src.bl.capp_validation import encode_request
+from src.bl.capp_models import JsonObject
 
-JsonObject = dict[str, Any]
 _MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 _TOKEN_REFRESH_SKEW_SECONDS = 30
 _SUCCESS_STATUS = {
@@ -23,6 +21,40 @@ _SUCCESS_STATUS = {
     HTTPMethod.GET: HTTPStatus.OK,
     HTTPMethod.PUT: HTTPStatus.OK,
 }
+
+
+def encode_request(body: JsonObject | None) -> bytes | None:
+    """Never retain serialization errors, which can contain request secrets."""
+    if body is None:
+        return None
+    try:
+        return json.dumps(body, allow_nan=False).encode("utf-8")
+    except (ValueError, TypeError, UnicodeError, RecursionError):
+        pass
+    raise CappError(CappErrorCode.INVALID_REQUEST)
+
+
+def _validate_base_url(base_url: str) -> str:
+    """Normalize HTTPS endpoints and reject credentials or malformed URL parts."""
+    valid = False
+    try:
+        url = urlsplit(base_url)
+        port = url.port  # Access validates nonnumeric and out-of-range ports.
+        valid = (
+            url.scheme == "https"
+            and bool(url.hostname)
+            and not url.username
+            and not url.password
+            and not url.query
+            and not url.fragment
+            and (port is None or 0 <= port <= 65535)
+            and not any(c.isspace() or ord(c) < 32 for c in base_url)
+        )
+    except (ValueError, TypeError):
+        pass
+    if not valid:
+        raise CappError(CappErrorCode.CONFIGURATION)
+    return base_url.rstrip("/")
 
 
 class CappTransport:
@@ -36,19 +68,9 @@ class CappTransport:
         transport: httpx.AsyncBaseTransport | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
+        self._base_url = _validate_base_url(base_url)
         try:
-            url = urlsplit(base_url)
-            valid = (
-                url.scheme == "https"
-                and bool(url.hostname)
-                and not url.username
-                and not url.password
-                and not url.query
-                and not url.fragment
-                and not any(c.isspace() or ord(c) < 32 for c in base_url)
-            )
-            url.port  # Validate malformed port syntax before any network call.
-            valid = valid and math.isfinite(timeout_seconds) and timeout_seconds > 0
+            valid = math.isfinite(timeout_seconds) and timeout_seconds > 0
         except (ValueError, TypeError):
             valid = False
         if (
@@ -59,7 +81,6 @@ class CappTransport:
             or not password
         ):
             raise CappError(CappErrorCode.CONFIGURATION)
-        self._base_url = base_url.rstrip("/")
         self._username, self._password = username, password
         self._timeout = timeout_seconds
         self._http = httpx.AsyncClient(

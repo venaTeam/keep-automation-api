@@ -109,12 +109,20 @@ existing synchronous Git/registry/reload adapters run in worker threads. No DB
 session crosses a CAPP await. Cancellation propagates and leaves the last durable
 checkpoint for a later retry; it is not converted to success or retried inline.
 
+All resource methods use the `wallet` argument, accepting a wallet name or an
+explicit `CappWalletTarget`. Secret creation always uses type `Opaque`;
+`SecretRequest` contains only `name` and `data`.
+
 Secret updates use a single PUT to replace the entire `data` map; omitted keys are
 removed. Secret results expose identity/version only, never data. Capp results
 expose name, UID, URL, image, conditions and version, without raw response JSON,
 environment values, annotations or freeform condition messages.
 
 ## Authentication and failures
+
+This integration supports only CAPP's `openshift` username/password mode. The
+platform must be configured for that mode. There is no mode selector, automatic
+mode discovery, or cluster/token (`passthrough`) authentication implementation.
 
 Login is lazy and token refresh is serialized by a per-client `asyncio.Lock`. Refresh
 starts within 30 seconds of expiry; a failed refresh falls back to one login.

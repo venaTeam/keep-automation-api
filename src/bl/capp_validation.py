@@ -1,6 +1,5 @@
 """Strict wire-shape validation based on caap.yaml; no onboarding policy."""
 
-import json
 from typing import Literal
 
 from pydantic import (
@@ -21,6 +20,7 @@ from src.bl.capp_errors import CappError, CappErrorCode
 
 
 class WireModel(BaseModel):
+    # Pydantic v1 can coerce tuples/model instances; require actual wire lists/dicts.
     @validator("*", pre=True)
     def wire_shapes(cls, value, field):
         if value is None:
@@ -177,17 +177,6 @@ class DeploymentConfig(WireModel):
 
 
 CONFIG_FIELDS = frozenset(DeploymentConfig.__fields__)
-
-
-def encode_request(body: dict | None) -> bytes | None:
-    """Never retain serialization errors, which can contain request secrets."""
-    if body is None:
-        return None
-    try:
-        return json.dumps(body, allow_nan=False).encode("utf-8")
-    except (ValueError, TypeError, UnicodeError, RecursionError):
-        pass
-    raise CappError(CappErrorCode.INVALID_REQUEST)
 
 
 def validate_config(

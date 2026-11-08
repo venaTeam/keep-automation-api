@@ -1,10 +1,10 @@
 """Validate CAPP responses and expose only supported resource fields."""
 
 import re
-from typing import Any
 
 from src.bl.capp_errors import CappError, CappErrorCode
 from src.bl.capp_models import (
+    JsonObject,
     CappCondition,
     CappResource,
     SecretResource,
@@ -12,7 +12,6 @@ from src.bl.capp_models import (
     ConditionStatus,
 )
 
-JsonObject = dict[str, Any]
 _CONDITION_STATUSES = frozenset(ConditionStatus)
 _CONDITION_SOURCES = frozenset(ConditionSource)
 
