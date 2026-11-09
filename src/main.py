@@ -43,6 +43,9 @@ async def lifespan(app: FastAPI):
         db_core.redacted_database_url(),
         config.DATABASE_URL_SOURCE,
     )
+    from src.api.deps import initialize_capp_client
+
+    app.state.capp_client = initialize_capp_client()
     try:
         yield
     finally:

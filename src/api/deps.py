@@ -6,6 +6,8 @@
 - internal tier -> service token (verified in D17/D20).
 """
 
+import logging
+
 from fastapi import Depends, Header, Request
 
 from src import config
@@ -17,11 +19,13 @@ from src.bl.cascade_adapters import (
     build_capp_client,
     get_default_registry_client,
 )
-from src.bl.capp_errors import CappError
+from src.bl.capp.errors import CappError
 from src.bl.git_client import GitClient, build_gitlab_client
 from src.core.reload import ReloadPublisher, get_default_reload_publisher
 from src.exceptions import LifecycleAuthenticationNotConfiguredError
 from src.models.api.identity import AuthenticatedEntity
+
+logger = logging.getLogger(__name__)
 
 
 def get_git_client() -> GitClient:
@@ -45,21 +49,20 @@ def get_reload_publisher() -> ReloadPublisher:
     return get_default_reload_publisher()
 
 
+def initialize_capp_client() -> CappDeletionClient:
+    """Validate startup settings and select the application's CAPP adapter."""
+    try:
+        return build_capp_client()
+    except CappError as exc:
+        # Keep deletion admission available; cleanup stops at the CAPP step.
+        # Correct deployment settings and restart workers to recover.
+        logger.warning("CAPP client not configured (%s)", exc.code.value)
+    return UnconfiguredCappDeletionClient()
+
+
 async def get_capp_deletion_client(request: Request) -> CappDeletionClient:
-    """One lazy client per app/loop. Lifespan closes its pool at shutdown."""
-    client = getattr(request.app.state, "capp_client", None)
-    if client is None:
-        # No await between lookup and assignment: concurrent requests on this
-        # loop cannot construct duplicate clients. No cross-loop singleton.
-        try:
-            client = build_capp_client()
-        except CappError:
-            # Admit deletion even when CAPP settings are unavailable. The cascade
-            # will retain checkpoint 1 and report failure at its CAPP step.
-            # Do not cache the fallback: later dependency resolution can recover.
-            return UnconfiguredCappDeletionClient()
-        request.app.state.capp_client = client
-    return client
+    """Return the adapter initialized by application startup."""
+    return request.app.state.capp_client
 
 
 def get_registry_client() -> RegistryClient:

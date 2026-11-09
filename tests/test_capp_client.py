@@ -7,13 +7,13 @@ from http import HTTPStatus
 
 import pytest
 
-from src.bl.capp_client import CappClient
-from src.bl.capp_errors import (
+from src.bl.capp.client import CappClient
+from src.bl.capp.errors import (
     CappConflictError,
     CappError,
     CappErrorCode,
 )
-from src.bl.capp_models import (
+from src.bl.capp.models import (
     CappRequest,
     CappWalletTarget,
     ConditionSource,
@@ -419,14 +419,14 @@ async def test_default_d18_client_uses_server_configuration(monkeypatch):
     monkeypatch.setattr(config, "CAPP_REQUEST_TIMEOUT_SECONDS", 7.0)
     app = FastAPI()
     request = Request({"type": "http", "app": app})
-    adapter = await get_capp_deletion_client(request)
-    assert isinstance(adapter, CappClient)
-    assert adapter is await get_capp_deletion_client(request)
-    try:
+    from src.main import lifespan
+
+    async with lifespan(app):
+        adapter = await get_capp_deletion_client(request)
+        assert isinstance(adapter, CappClient)
+        assert adapter is await get_capp_deletion_client(request)
         with pytest.raises(CappError, match="invalid_target"):
             await adapter.delete_capp("../invalid", NAME)
-    finally:
-        await adapter.aclose()
 
 
 async def test_condition_enums_preserve_wire_values():
@@ -492,6 +492,7 @@ async def test_app_lifespan_closes_its_client_and_does_not_share_across_apps(
     monkeypatch.setattr(dependencies, "build_capp_client", build)
     first_app, second_app = FastAPI(), FastAPI()
     async with lifespan(first_app), lifespan(second_app):
+        assert len(clients) == 2  # Both clients exist before the first request.
         first = await get_capp_deletion_client(
             Request({"type": "http", "app": first_app})
         )

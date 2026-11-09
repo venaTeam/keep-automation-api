@@ -15,9 +15,9 @@ from uuid import uuid4
 
 import pytest
 
-from src.bl.capp_client import CappClient
-from src.bl.capp_errors import CappError, CappErrorCode, error_for_status
-from src.bl.capp_models import CappRequest, SecretRequest
+from src.bl.capp.client import CappClient
+from src.bl.capp.errors import CappError, CappErrorCode, error_for_status
+from src.bl.capp.models import CappRequest, SecretRequest
 from src.config import load_capp_client_settings
 
 

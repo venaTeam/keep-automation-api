@@ -174,7 +174,7 @@ except (ValueError, TypeError):
 
 def load_capp_client_settings() -> dict:
     """Return startup settings; never reread the environment on a request."""
-    from src.bl.capp_errors import CappError, CappErrorCode
+    from src.bl.capp.errors import CappError, CappErrorCode
 
     if CAPP_REQUEST_TIMEOUT_SECONDS is None:
         raise CappError(CappErrorCode.CONFIGURATION)

@@ -67,7 +67,7 @@ Start with these files before changing lifecycle behavior:
 - `src/bl/cascade.py`: deletion admission, five async cascade steps, checkpoints,
   resume, and tenant-scoped deboarding.
 - `src/bl/cascade_adapters.py`: external adapter interfaces and resource naming.
-- `src/bl/capp_client.py`: async Capp and run-auth Secret operations.
+- `src/bl/capp/client.py`: async Capp and run-auth Secret operations.
 - `src/api/routes/user/lifecycle_routes.py`: user-facing lifecycle routes.
 
 The implementation phases below describe the original design, not a list of

@@ -2,8 +2,8 @@
 
 import re
 
-from src.bl.capp_errors import CappError, CappErrorCode
-from src.bl.capp_models import (
+from src.bl.capp.errors import CappError, CappErrorCode
+from src.bl.capp.models import (
     JsonObject,
     CappCondition,
     CappResource,

@@ -1,6 +1,6 @@
 # D16 CAPP management adapter
 
-`src/bl/capp_client.py` implements Capp and Keep-owned run-auth Secret
+`src/bl/capp/client.py` implements Capp and Keep-owned run-auth Secret
 create/get/update/delete against the supplied `caap.yaml` contract. It uses
 `httpx.AsyncClient`: await each resource operation after closing the DB transaction.
 It never reads or writes the database, advances `active_digest`, polls readiness,
@@ -8,11 +8,11 @@ or invokes `/run`.
 
 ## Module responsibilities
 
-- `capp_client.py` checks target URL syntax and builds resource requests.
-- `capp_transport.py` owns the HTTP pool, authentication, token refresh, deadlines,
+- `client.py` checks target URL syntax and builds resource requests.
+- `transport.py` owns the HTTP pool, authentication, token refresh, deadlines,
   status handling, and rejection of responses that echo passwords or tokens.
-- `capp_responses.py` validates responses and produces typed resource results.
-- `capp_validation.py` validates nested request fields against the supplied CAPP
+- `responses.py` validates responses and produces typed resource results.
+- `validation.py` validates nested request fields against the supplied CAPP
   contract without coercing values or filling omitted update fields. Invalid
   request serialization raises sanitized `invalid_request` before authentication.
 
@@ -44,8 +44,8 @@ timeout, or credentials requires restarting workers.
 ## Callers
 
 ```python
-from src.bl.capp_client import CappClient
-from src.bl.capp_models import CappRequest
+from src.bl.capp.client import CappClient
+from src.bl.capp.models import CappRequest
 from src.config import load_capp_client_settings
 
 request = CappRequest(
@@ -68,7 +68,7 @@ async with CappClient(**load_capp_client_settings()) as client:
 ```
 
 In API routes, reuse the app-scoped client supplied by `get_capp_deletion_client`.
-It is created lazily on that app's event loop and closed during FastAPI lifespan
+It is created at startup on that app's event loop and closed during FastAPI lifespan
 shutdown. Standalone async callers own the client via `async with` or
 `await client.aclose()`. Do not share a client across event loops or instantiate
 one per call in a polling loop. This follows
@@ -93,12 +93,12 @@ digest on failure, and let the reconciler inspect ambiguous mutations before
 retrying. CAPP owns traffic switching and retaining the old serving revision.
 The local mocked tests cannot prove that external traffic behavior.
 
-D18's default deletion dependency constructs this client when configuration is
-valid. Missing or invalid CAPP settings return an unconfigured deletion adapter,
-so deletion can stop matching and commit checkpoint 1. Cleanup then stops at the
-CAPP step for a later reconciler retry. The fallback is not cached. Correct deployment settings and restart workers to
-load the corrected startup configuration.
-Only successfully constructed clients are cached and closed during shutdown.
+Application startup validates CAPP settings and constructs one client per app.
+Missing or invalid settings log a sanitized warning once at startup and select an
+unconfigured deletion adapter, so deletion can stop matching and commit checkpoint 1.
+Cleanup then stops at the CAPP step for a later reconciler retry. Correct deployment
+settings and restart workers to load the corrected configuration. Requests reuse
+the startup adapter; shutdown closes it. Initialization makes no network calls.
 Deletes accept
 both 204 and 404. `capp_name_for` supports legacy name-valued deployment IDs and
 new UID-valued IDs, using the deterministic name for the latter. Secret methods

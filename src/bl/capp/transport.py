@@ -11,9 +11,9 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from src.bl.capp_errors import CappError, CappErrorCode, error_for_status
-from src.bl.capp_responses import required_string
-from src.bl.capp_models import JsonObject
+from src.bl.capp.errors import CappError, CappErrorCode, error_for_status
+from src.bl.capp.responses import required_string
+from src.bl.capp.models import JsonObject
 
 _MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 _TOKEN_REFRESH_SKEW_SECONDS = 30
@@ -41,7 +41,7 @@ def _validate_base_url(base_url: str) -> str:
     valid = False
     try:
         url = urlsplit(base_url)
-        port = url.port  # Access validates nonnumeric and out-of-range ports.
+        _ = url.port  # Access validates nonnumeric and out-of-range ports.
         valid = (
             url.scheme == "https"
             and bool(url.hostname)
@@ -49,7 +49,6 @@ def _validate_base_url(base_url: str) -> str:
             and not url.password
             and not url.query
             and not url.fragment
-            and (port is None or 0 <= port <= 65535)
             and not any(c.isspace() or ord(c) < 32 for c in base_url)
         )
     except (ValueError, TypeError):

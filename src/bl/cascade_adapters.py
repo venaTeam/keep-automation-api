@@ -15,7 +15,7 @@ from src import config
 from src.bl.registry_client import ArtifactoryRegistryClient
 
 if TYPE_CHECKING:
-    from src.bl.capp_client import CappClient
+    from src.bl.capp.client import CappClient
 
 
 class ExternalDependencyNotConfiguredError(RuntimeError):
@@ -70,6 +70,9 @@ class RegistryClient(Protocol):
 
 
 class UnconfiguredCappDeletionClient:
+    async def aclose(self) -> None:
+        """The fallback owns no connections to close."""
+
     async def delete_capp(self, wallet: str, name: str) -> None:
         raise ExternalDependencyNotConfiguredError("CAPP client not configured (D16)")
 
@@ -91,7 +94,7 @@ _registry_lock = threading.Lock()
 
 def build_capp_client() -> "CappClient":
     """Construct a client for one application's event loop; its owner closes it."""
-    from src.bl.capp_client import CappClient
+    from src.bl.capp.client import CappClient
 
     return CappClient(**config.load_capp_client_settings())
 

@@ -215,14 +215,14 @@ async def test_blocking_adapter_failure_preserves_checkpoint_and_resumes(
     ],
 )
 async def test_delete_admitted_when_capp_configuration_is_invalid(
-    state, monkeypatch, bad_settings
+    state, monkeypatch, bad_settings, caplog
 ):
     from datetime import datetime, timezone
     import httpx
     from fastapi import FastAPI, Request
     from src.api import deps as api_deps
     from src.api.routes.user.lifecycle_routes import router
-    from src.bl.capp_client import CappClient
+    from src.bl.capp.client import CappClient
     from src.models.api.identity import AuthenticatedEntity
     from src.models.db.automation import BuildState
     from src.main import lifespan
@@ -290,14 +290,26 @@ async def test_delete_admitted_when_capp_configuration_is_invalid(
         assert "checkpoint-2" not in calls
         assert world.publishes == 1
         assert world.capps and world.secrets and world.images
-        assert not hasattr(app.state, "capp_client")
-        # Simulate corrected startup settings after a restart; fallback owns no pool.
-        for key, value in settings.items():
-            monkeypatch.setattr(
-                config,
-                key,
-                float(value) if key == "CAPP_REQUEST_TIMEOUT_SECONDS" else value,
-            )
+        assert isinstance(app.state.capp_client, api_deps.UnconfiguredCappDeletionClient)
+        await api_deps.get_capp_deletion_client(Request({"type": "http", "app": app}))
+        warnings = [
+            record for record in caplog.records if record.name == api_deps.__name__
+        ]
+        assert len(warnings) == 1
+        code = "invalid_target" if "CAPP_CLUSTER" in bad_settings else "configuration"
+        assert warnings[0].getMessage() == f"CAPP client not configured ({code})"
+        assert warnings[0].exc_info is None
+        assert settings["CAPP_USERNAME"] not in caplog.text
+        assert settings["CAPP_PASSWORD"] not in caplog.text
+    assert not hasattr(app.state, "capp_client")
+    # Simulate corrected startup settings after a restart; fallback owns no pool.
+    for key, value in settings.items():
+        monkeypatch.setattr(
+            config,
+            key,
+            float(value) if key == "CAPP_REQUEST_TIMEOUT_SECONDS" else value,
+        )
+    async with lifespan(app):
         actual = await api_deps.get_capp_deletion_client(
             Request({"type": "http", "app": app})
         )
@@ -308,8 +320,8 @@ async def test_delete_admitted_when_capp_configuration_is_invalid(
 
 async def test_created_capp_uid_is_deleted_using_its_deterministic_name(state):
     import httpx
-    from src.bl.capp_client import CappClient
-    from src.bl.capp_models import CappRequest
+    from src.bl.capp.client import CappClient
+    from src.bl.capp.models import CappRequest
     from tests.capp_fakes import NOW, IMAGE, IDENTITY, tokens, capp
 
     row, _, _ = state

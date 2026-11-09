@@ -7,9 +7,9 @@ from datetime import timedelta
 from http import HTTPMethod, HTTPStatus
 import httpx
 import pytest
-from src.bl.capp_transport import CappTransport
-from src.bl.capp_errors import CappError, CappErrorCode, CappAuthenticationError
-from src.bl.capp_models import SecretRequest
+from src.bl.capp.transport import CappTransport
+from src.bl.capp.errors import CappError, CappErrorCode, CappAuthenticationError
+from src.bl.capp.models import SecretRequest
 from tests.capp_fakes import NOW, NAME, SECRET, ROOT, IDENTITY, Wire, tokens, capp
 
 _clients = []

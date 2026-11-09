@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.bl.capp_errors import CappError, CappErrorCode
+from src.bl.capp.errors import CappError, CappErrorCode
 from tests import test_capp_live as live
 
 

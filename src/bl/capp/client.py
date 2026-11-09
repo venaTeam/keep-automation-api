@@ -1,7 +1,7 @@
 """Async CAPP resource operations for caller-supplied wallet targets.
 
 Await calls after releasing DB sessions. Authentication and HTTP live in
-CappTransport; response validation lives in capp_responses.
+CappTransport; response validation lives in capp.responses.
 """
 
 import copy
@@ -13,8 +13,8 @@ from typing import TypeAlias
 
 import httpx
 
-from src.bl.capp_errors import CappError, CappErrorCode
-from src.bl.capp_models import (
+from src.bl.capp.errors import CappError, CappErrorCode
+from src.bl.capp.models import (
     JsonObject,
     CappRequest,
     CappResource,
@@ -23,9 +23,9 @@ from src.bl.capp_models import (
     SecretResource,
     SecretUpdateRequest,
 )
-from src.bl.capp_responses import parse_capp, parse_secret
-from src.bl.capp_transport import CappTransport
-from src.bl.capp_validation import CONFIG_FIELDS, validate_config
+from src.bl.capp.responses import parse_capp, parse_secret
+from src.bl.capp.transport import CappTransport
+from src.bl.capp.validation import CONFIG_FIELDS, validate_config
 
 WalletTarget: TypeAlias = CappWalletTarget | str
 

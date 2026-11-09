@@ -16,7 +16,7 @@ from pydantic import (
 
 from pydantic.fields import SHAPE_LIST
 
-from src.bl.capp_errors import CappError, CappErrorCode
+from src.bl.capp.errors import CappError, CappErrorCode
 
 
 class WireModel(BaseModel):
