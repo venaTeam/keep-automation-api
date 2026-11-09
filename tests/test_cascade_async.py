@@ -239,6 +239,12 @@ async def test_delete_admitted_when_capp_configuration_is_invalid(
             monkeypatch.delenv(key, raising=False)
         else:
             monkeypatch.setenv(key, value)
+    import runpy
+    from src import config
+
+    startup = runpy.run_path(config.__file__)
+    for key in settings:
+        monkeypatch.setattr(config, key, startup[key])
     row, calls, loop_thread = state
     row.matching_state = MatchingState.ACTIVE
     row.delete_cascade_step = None
@@ -285,9 +291,13 @@ async def test_delete_admitted_when_capp_configuration_is_invalid(
         assert world.publishes == 1
         assert world.capps and world.secrets and world.images
         assert not hasattr(app.state, "capp_client")
-        # Corrected settings can construct a real client; the fallback was not cached.
+        # Simulate corrected startup settings after a restart; fallback owns no pool.
         for key, value in settings.items():
-            monkeypatch.setenv(key, value)
+            monkeypatch.setattr(
+                config,
+                key,
+                float(value) if key == "CAPP_REQUEST_TIMEOUT_SECONDS" else value,
+            )
         actual = await api_deps.get_capp_deletion_client(
             Request({"type": "http", "app": app})
         )

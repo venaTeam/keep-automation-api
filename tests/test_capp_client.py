@@ -22,7 +22,6 @@ from src.bl.capp_models import (
     SecretUpdateRequest,
 )
 from src.bl.cascade_adapters import CappDeletionClient
-from src.config import load_capp_client_settings
 
 from tests.capp_fakes import (
     NOW,
@@ -356,20 +355,45 @@ async def test_invalid_configuration(changes):
         )
 
 
-async def test_environment_settings_and_safe_failures():
-    with pytest.raises(CappError, match="configuration"):
-        load_capp_client_settings({})
-    env = dict(
-        CAPP_BASE_URL="https://capp.example",
-        CAPP_USERNAME=IDENTITY[0],
-        CAPP_PASSWORD=IDENTITY[1],
-        CAPP_CLUSTER="dev",
+async def test_environment_settings_are_captured_at_startup(monkeypatch):
+    import runpy
+    from src import config
+
+    settings = {
+        "CAPP_BASE_URL": "https://capp.example",
+        "CAPP_USERNAME": IDENTITY[0],
+        "CAPP_PASSWORD": IDENTITY[1],
+        "CAPP_CLUSTER": "dev",
+        "CAPP_REQUEST_TIMEOUT_SECONDS": "7",
+    }
+    for key, value in settings.items():
+        monkeypatch.setenv(key, value)
+    startup = runpy.run_path(config.__file__)
+    loaded = startup["load_capp_client_settings"]()
+    assert loaded == dict(
+        base_url=settings["CAPP_BASE_URL"],
+        username=IDENTITY[0],
+        password=IDENTITY[1],
+        cluster="dev",
+        timeout_seconds=7.0,
     )
-    assert load_capp_client_settings(env)["cluster"] == "dev"
-    env["CAPP_REQUEST_TIMEOUT_SECONDS"] = IDENTITY[1]
+    for key in settings:
+        monkeypatch.setenv(key, "changed-after-startup")
+    assert startup["load_capp_client_settings"]() == loaded
+
+
+async def test_invalid_startup_capp_timeout_is_sanitized(monkeypatch):
+    import runpy
+    from src import config
+
+    monkeypatch.setenv("CAPP_REQUEST_TIMEOUT_SECONDS", IDENTITY[1])
+    startup = runpy.run_path(config.__file__)
+    assert startup["CAPP_REQUEST_TIMEOUT_SECONDS"] is None
     with pytest.raises(CappError) as caught:
-        load_capp_client_settings(env)
-    assert IDENTITY[1] not in str(caught.value) and caught.value.__context__ is None
+        startup["load_capp_client_settings"]()
+    assert caught.value.code is CappErrorCode.CONFIGURATION
+    assert IDENTITY[1] not in str(caught.value)
+    assert caught.value.__context__ is None
 
 
 async def test_d18_resolves_uid_and_legacy_name():
@@ -386,10 +410,13 @@ async def test_default_d18_client_uses_server_configuration(monkeypatch):
     from fastapi import FastAPI, Request
     from src.api.deps import get_capp_deletion_client
 
-    monkeypatch.setenv("CAPP_BASE_URL", "https://capp.example")
-    monkeypatch.setenv("CAPP_USERNAME", IDENTITY[0])
-    monkeypatch.setenv("CAPP_PASSWORD", IDENTITY[1])
-    monkeypatch.setenv("CAPP_CLUSTER", "dev")
+    from src import config
+
+    monkeypatch.setattr(config, "CAPP_BASE_URL", "https://capp.example")
+    monkeypatch.setattr(config, "CAPP_USERNAME", IDENTITY[0])
+    monkeypatch.setattr(config, "CAPP_PASSWORD", IDENTITY[1])
+    monkeypatch.setattr(config, "CAPP_CLUSTER", "dev")
+    monkeypatch.setattr(config, "CAPP_REQUEST_TIMEOUT_SECONDS", 7.0)
     app = FastAPI()
     request = Request({"type": "http", "app": app})
     adapter = await get_capp_deletion_client(request)

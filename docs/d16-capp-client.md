@@ -36,8 +36,10 @@ secret store. Never send them from an authoring request or log configuration.
 Wallet onboarding and tenant authorization belong to the calling business layer,
 outside D16. The client has no wallet registry or allowlist. A wallet name uses
 `CAPP_CLUSTER`; a `CappWalletTarget(cluster, wallet_name)` supplies both explicitly.
-Both path segments are checked for valid URL syntax only. Changing the configured
-default cluster or credentials requires restarting workers.
+Both path segments are checked for valid URL syntax only.
+CAPP settings are read once when `src.config` is imported during process startup,
+like the other environment settings. Changing the default cluster, endpoint,
+timeout, or credentials requires restarting workers.
 
 ## Callers
 
@@ -94,8 +96,8 @@ The local mocked tests cannot prove that external traffic behavior.
 D18's default deletion dependency constructs this client when configuration is
 valid. Missing or invalid CAPP settings return an unconfigured deletion adapter,
 so deletion can stop matching and commit checkpoint 1. Cleanup then stops at the
-CAPP step for a later reconciler retry. The fallback is not cached; a later
-dependency resolution can construct the real client after settings are corrected.
+CAPP step for a later reconciler retry. The fallback is not cached. Correct deployment settings and restart workers to
+load the corrected startup configuration.
 Only successfully constructed clients are cached and closed during shutdown.
 Deletes accept
 both 204 and 404. `capp_name_for` supports legacy name-valued deployment IDs and

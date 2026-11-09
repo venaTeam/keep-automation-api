@@ -156,23 +156,32 @@ ARTIFACTORY_TIMEOUT_SECONDS = float(
 )
 
 
-# Inject only into this service from the deployment secret store. Loading is
-# lazy so unprovisioned local installations can still run unrelated endpoints.
-def load_capp_client_settings(environ: Mapping[str, str] | None = None) -> dict:
+# CAPP settings are captured at process startup, like the other service settings.
+# Inject identity only through this service's deployment secret store.
+CAPP_BASE_URL = os.environ.get("CAPP_BASE_URL", "")
+CAPP_USERNAME = os.environ.get("CAPP_USERNAME", "")
+CAPP_PASSWORD = os.environ.get("CAPP_PASSWORD", "")
+CAPP_CLUSTER = os.environ.get("CAPP_CLUSTER", "")
+try:
+    CAPP_REQUEST_TIMEOUT_SECONDS = float(
+        os.environ.get("CAPP_REQUEST_TIMEOUT_SECONDS", "30")
+    )
+except (ValueError, TypeError):
+    # Preserve DELETE admission: invalid CAPP settings fail at the cleanup step.
+    # Do not log the raw value or retain the parsing exception.
+    CAPP_REQUEST_TIMEOUT_SECONDS = None
+
+
+def load_capp_client_settings() -> dict:
+    """Return startup settings; never reread the environment on a request."""
     from src.bl.capp_errors import CappError, CappErrorCode
 
-    env = os.environ if environ is None else environ
-    settings = None
-    try:
-        settings = dict(
-            base_url=env["CAPP_BASE_URL"],
-            username=env["CAPP_USERNAME"],
-            password=env["CAPP_PASSWORD"],
-            timeout_seconds=float(env.get("CAPP_REQUEST_TIMEOUT_SECONDS", "30")),
-            cluster=env["CAPP_CLUSTER"],
-        )
-    except (KeyError, ValueError, TypeError):
-        pass
-    if settings is None:
+    if CAPP_REQUEST_TIMEOUT_SECONDS is None:
         raise CappError(CappErrorCode.CONFIGURATION)
-    return settings
+    return dict(
+        base_url=CAPP_BASE_URL,
+        username=CAPP_USERNAME,
+        password=CAPP_PASSWORD,
+        timeout_seconds=CAPP_REQUEST_TIMEOUT_SECONDS,
+        cluster=CAPP_CLUSTER,
+    )
