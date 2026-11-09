@@ -29,15 +29,15 @@ from src.bl.capp_validation import CONFIG_FIELDS, validate_config
 
 WalletTarget: TypeAlias = CappWalletTarget | str
 
+_PATH_SEGMENT = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]*")
+_IMAGE_DIGEST = re.compile(r"[^\s@]+@sha256:[0-9a-f]{64}")
 _OWNED_SECRET = re.compile(
     r"automation-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-run-auth"
 )
 
 
 def _segment(value: str) -> str:
-    if not isinstance(value, str) or not re.fullmatch(
-        r"[a-zA-Z0-9][a-zA-Z0-9_.-]*", value
-    ):
+    if not isinstance(value, str) or not _PATH_SEGMENT.fullmatch(value):
         raise CappError(CappErrorCode.INVALID_TARGET)
     return value
 
@@ -82,10 +82,11 @@ class CappClient:
             )
         return CappWalletTarget(self._cluster, _segment(wallet))
 
-    def _path(self, wallet: WalletTarget, kind: str, name: str | None = None) -> str:
-        wallet = self._target(wallet)
+    @staticmethod
+    def _path(target: CappWalletTarget, kind: str, name: str | None = None) -> str:
+        """Build a resource path from a target validated by the public operation."""
         suffix = f"/{_segment(name)}" if name is not None else ""
-        return f"/api/v1/clusters/{wallet.cluster}/namespaces/{wallet.wallet_name}/{kind}{suffix}"
+        return f"/api/v1/clusters/{target.cluster}/namespaces/{target.wallet_name}/{kind}{suffix}"
 
     async def __aenter__(self) -> "CappClient":
         return self
@@ -99,9 +100,7 @@ class CappClient:
 
     def _capp_body(self, spec: CappRequest) -> JsonObject:
         _segment(spec.name)
-        if not isinstance(spec.image, str) or not re.fullmatch(
-            r"[^\s@]+@sha256:[0-9a-f]{64}", spec.image
-        ):
+        if not isinstance(spec.image, str) or not _IMAGE_DIGEST.fullmatch(spec.image):
             raise CappError(CappErrorCode.INVALID_REQUEST)
         if not isinstance(spec.config, dict) or spec.config.keys() - CONFIG_FIELDS:
             raise CappError(CappErrorCode.INVALID_REQUEST)
@@ -113,30 +112,33 @@ class CappClient:
     async def create_capp(
         self, wallet: WalletTarget, spec: CappRequest
     ) -> CappResource:
-        path = self._path(wallet, "capps")
+        target = self._target(wallet)
+        path = self._path(target, "capps")
         raw = await self._transport.request(
             HTTPMethod.POST, path, self._capp_body(spec)
         )
-        return parse_capp(raw, self._target(wallet).wallet_name, spec.name)
+        return parse_capp(raw, target.wallet_name, spec.name)
 
     async def get_capp(self, wallet: WalletTarget, name: str) -> CappResource:
+        target = self._target(wallet)
         return parse_capp(
             await self._transport.request(
-                HTTPMethod.GET, self._path(wallet, "capps", name)
+                HTTPMethod.GET, self._path(target, "capps", name)
             ),
-            self._target(wallet).wallet_name,
+            target.wallet_name,
             name,
         )
 
     async def update_capp(
         self, wallet: WalletTarget, name: str, spec: CappRequest
     ) -> CappResource:
-        path = self._path(wallet, "capps", name)
+        target = self._target(wallet)
+        path = self._path(target, "capps", name)
         changes = self._capp_body(spec)
         if spec.name != name:
             raise CappError(CappErrorCode.INVALID_REQUEST)
         current = await self._transport.request(HTTPMethod.GET, path)
-        parse_capp(current, self._target(wallet).wallet_name, name)
+        parse_capp(current, target.wallet_name, name)
         body = {k: v for k, v in current.items() if k in CONFIG_FIELDS}
         # Response 'resources' is the resolved value; request uses customResources.
         if not body.get("size") and current.get("resources"):
@@ -151,21 +153,22 @@ class CappClient:
         # Per caap.yaml the backend preserves metadata/resourceVersion itself.
         return parse_capp(
             await self._transport.request(HTTPMethod.PUT, path, body),
-            self._target(wallet).wallet_name,
+            target.wallet_name,
             name,
         )
 
     async def delete_capp(self, wallet: WalletTarget, name: str) -> None:
+        target = self._target(wallet)
         await self._transport.request(
-            HTTPMethod.DELETE, self._path(wallet, "capps", name)
+            HTTPMethod.DELETE, self._path(target, "capps", name)
         )
 
     def _secret_path(
-        self, wallet: WalletTarget, name: str, collection: bool = False
+        self, target: CappWalletTarget, name: str, collection: bool = False
     ) -> str:
         if not isinstance(name, str) or not _OWNED_SECRET.fullmatch(name):
             raise CappError(CappErrorCode.INVALID_TARGET)
-        return self._path(wallet, "secrets", None if collection else name)
+        return self._path(target, "secrets", None if collection else name)
 
     @staticmethod
     def _secret_data(data: dict[str, str]) -> dict[str, str]:
@@ -178,7 +181,8 @@ class CappClient:
     async def create_secret(
         self, wallet: WalletTarget, spec: SecretRequest
     ) -> SecretResource:
-        path = self._secret_path(wallet, spec.name, collection=True)
+        target = self._target(wallet)
+        path = self._secret_path(target, spec.name, collection=True)
         body = {
             "name": spec.name,
             "type": "Opaque",
@@ -186,31 +190,34 @@ class CappClient:
         }
         return parse_secret(
             await self._transport.request(HTTPMethod.POST, path, body),
-            self._target(wallet).wallet_name,
+            target.wallet_name,
             spec.name,
         )
 
     async def get_secret(self, wallet: WalletTarget, name: str) -> SecretResource:
+        target = self._target(wallet)
         return parse_secret(
             await self._transport.request(
-                HTTPMethod.GET, self._secret_path(wallet, name)
+                HTTPMethod.GET, self._secret_path(target, name)
             ),
-            self._target(wallet).wallet_name,
+            target.wallet_name,
             name,
         )
 
     async def update_secret(
         self, wallet: WalletTarget, name: str, spec: SecretUpdateRequest
     ) -> SecretResource:
-        path = self._secret_path(wallet, name)
+        target = self._target(wallet)
+        path = self._secret_path(target, name)
         body = {"data": self._secret_data(spec.data)}
         return parse_secret(
             await self._transport.request(HTTPMethod.PUT, path, body),
-            self._target(wallet).wallet_name,
+            target.wallet_name,
             name,
         )
 
     async def delete_secret(self, wallet: WalletTarget, name: str) -> None:
+        target = self._target(wallet)
         await self._transport.request(
-            HTTPMethod.DELETE, self._secret_path(wallet, name)
+            HTTPMethod.DELETE, self._secret_path(target, name)
         )
