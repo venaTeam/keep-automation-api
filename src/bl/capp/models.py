@@ -61,6 +61,7 @@ class CappResource:
     image: str
     conditions: tuple[CappCondition, ...]
     resource_version: str | None = None
+    config: JsonObject = field(default_factory=dict, repr=False)
 
 
 @dataclass(frozen=True)

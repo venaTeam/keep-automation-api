@@ -1,6 +1,6 @@
 """Build completion — the CI webhook's cutover logic (D15, spec §5.1, §8.2).
 
-Synchronous like the rest of the BL; the route runs it via `run_in_threadpool`.
+Async orchestration; complete DB transactions and publishers run in worker threads.
 
 **Admission.** A webhook acts only on the build it was started for: the row must
 be `build_state=building`, its `building_sha` must equal the payload's
@@ -16,7 +16,7 @@ commit, so that would let a token holder roll a live automation back.
 **Success.** CAPP first, then the row. The deployment is created (first build)
 or rolled out (later builds) with **no DB connection held** — a hung CAPP call
 must not pin the small shared pool (ADR-008; same shape as authoring's git
-call). Only once CAPP has accepted the image does a short transaction advance
+call). Only once CAPP reports readiness for the image does a short transaction advance
 `active_digest`, so the digest we record is always the one being served. A
 CAPP failure raises `CappUnavailableError` (→ 503) and writes nothing: the row
 is as the call found it (normally `building`, lock held), old digest live (spec
@@ -48,17 +48,25 @@ only the automation id from the script path — so the row is found by id alone.
 The tenant comes *from* the row, and is stamped on the SSE event so D19 routes
 it to that tenant only. Nothing about the row is returned to the caller.
 """
+
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from uuid import UUID
 
+from fastapi.concurrency import run_in_threadpool
+
 from sqlalchemy import select, update
 from sqlalchemy.exc import SQLAlchemyError
 
 from src import config
-from src.bl.capp.deployment import CappClient, CappDeployment, SyncCappDeletionClient
-from src.bl.cascade_adapters import run_auth_secret_name
+from src.bl.capp.deployment import CappDeploymentClient, CappDeployment
+from src.bl.cascade_adapters import (
+    CappDeletionClient,
+    UnconfiguredCappDeletionClient,
+    capp_name_for,
+    run_auth_secret_name,
+)
 from src.contracts.validation_errors import ErrorCode, FieldError
 from src.core.automation_events import AutomationEventPublisher
 from src.core.db import get_session, lock_first
@@ -232,15 +240,7 @@ def _require_own_image(event: CiWebhookIn) -> None:
         )
 
 
-def apply_build_result(
-    event: CiWebhookIn,
-    capp: CappClient,
-    reload: ReloadPublisher,
-    events: AutomationEventPublisher,
-    deletion: SyncCappDeletionClient | None = None,
-) -> CiWebhookOut:
-    if deletion is None:
-        deletion = SyncCappDeletionClient()
+def _read_target(event: CiWebhookIn) -> _BuildTarget | IgnoredReason:
     # Phase 1 — admission + snapshot, connection released before any CAPP call.
     with get_session() as session:
         automation = _load(session, event.automation_id)
@@ -250,16 +250,29 @@ def apply_build_result(
         # live automation back to an older digest (see `_failure_raced`).
         reason = _admission(automation, event.commit_sha)
         if reason is not None:
-            return _ignored(event, reason)
-        target = _BuildTarget(
+            return reason
+        return _BuildTarget(
             tenant_id=automation.tenant_id,
             wallet=automation.namespace,
             secret_name=automation.secret_name,
             capp_deployment_id=automation.capp_deployment_id,
         )
 
+
+async def apply_build_result(
+    event: CiWebhookIn,
+    capp: CappDeploymentClient,
+    reload: ReloadPublisher,
+    events: AutomationEventPublisher,
+    deletion: CappDeletionClient | None = None,
+) -> CiWebhookOut:
+    deletion = deletion if deletion is not None else UnconfiguredCappDeletionClient()
+    target = await run_in_threadpool(_read_target, event)
+    if isinstance(target, IgnoredReason):
+        return _ignored(event, target)
+
     if event.status == BuildOutcome.FAILED:
-        return _record_failure(event, events)
+        return await run_in_threadpool(_record_failure, event, events)
 
     _require_own_image(event)
 
@@ -270,16 +283,16 @@ def apply_build_result(
     secret_refs = [target.secret_name] if target.secret_name else []
     try:
         if target.capp_deployment_id is None:
-            created = capp.create_deployment(
+            created = await capp.create_deployment(
                 automation_id=event.automation_id,
                 wallet=target.wallet,
                 image=event.image,
                 secret_refs=secret_refs,
             )
         else:
-            # No wallet: it is fixed at create (authoring refuses a change once
-            # deployed). The secret can change with an edit, so it travels.
-            capp.rollout(
+            await capp.rollout(
+                automation_id=event.automation_id,
+                wallet=target.wallet,
                 deployment_id=target.capp_deployment_id,
                 image=event.image,
                 secret_refs=secret_refs,
@@ -289,14 +302,59 @@ def apply_build_result(
         # nothing. Type name only — the text must never reach logs (§3.4).
         logger.warning(
             "ci-webhook CAPP %s failed (%s): automation=%s sha=%s; build stays "
-            "locked, old digest serving",
+            "locked, database digest unchanged",
             operation,
             type(exc).__name__,
             event.automation_id,
             event.commit_sha,
         )
+        # Creation/update can succeed before readiness fails. If deletion raced
+        # that wait, the cascade may already have passed its CAPP checkpoint.
+        # Compensate using the snapshot's wallet and deterministic resource name.
+        try:
+            latest = await run_in_threadpool(_read_target, event)
+        except (AutomationNotFoundError, AutomationBusyError, SQLAlchemyError):
+            latest = None  # Preserve the original retryable deployment failure.
+        if latest == IgnoredReason.DELETING:
+            await _tear_down(
+                event,
+                target.wallet,
+                capp_name_for(event.automation_id, target.capp_deployment_id),
+                deletion,
+            )
         raise
 
+    ignored, build_event = await run_in_threadpool(
+        _commit_success, event, created, operation
+    )
+
+    if ignored is not None:
+        if ignored == IgnoredReason.DELETING:
+            # The cascade may already have run its CAPP step (a 404 for a
+            # create still in flight) and never runs it again; a rollout may
+            # have landed after it. Undo what this call put there.
+            stored_id = created.deployment_id if created else target.capp_deployment_id
+            name = capp_name_for(event.automation_id, stored_id)
+            await _tear_down(event, target.wallet, name, deletion)
+        return _ignored(event, ignored)
+
+    logger.info(
+        "ci-webhook cutover: automation=%s sha=%s image=%s first_deploy=%s",
+        event.automation_id,
+        event.commit_sha,
+        event.image,
+        created is not None,
+    )
+    # After commit, best-effort: neither may undo a committed cutover.
+    await run_in_threadpool(reload.publish_reload)
+    await run_in_threadpool(events.publish, build_event)
+    return CiWebhookOut(status=CiWebhookResult.APPLIED)
+
+
+def _commit_success(
+    event: CiWebhookIn, created: CappDeployment | None, operation: str
+) -> tuple[IgnoredReason | None, dict | None]:
+    build_event = None
     # Phase 3 — atomic cutover, admission re-checked under the row lock. CAPP
     # has accepted the image by now, so a failure to record it leaves CAPP
     # ahead of the row: logged, and answered 503 so CI redelivers.
@@ -354,26 +412,7 @@ def apply_build_result(
             raise
         raise BuildNotRecordedError() from exc
 
-    if ignored is not None:
-        if ignored == IgnoredReason.DELETING:
-            # The cascade may already have run its CAPP step (a 404 for a
-            # create still in flight) and never runs it again; a rollout may
-            # have landed after it. Undo what this call put there.
-            name = created.deployment_id if created else target.capp_deployment_id
-            _tear_down(event, target.wallet, name, deletion)
-        return _ignored(event, ignored)
-
-    logger.info(
-        "ci-webhook cutover: automation=%s sha=%s image=%s first_deploy=%s",
-        event.automation_id,
-        event.commit_sha,
-        event.image,
-        created is not None,
-    )
-    # After commit, best-effort: neither may undo a committed cutover.
-    reload.publish_reload()
-    events.publish(build_event)
-    return CiWebhookOut(status=CiWebhookResult.APPLIED)
+    return ignored, build_event
 
 
 def _cut_over(
@@ -408,11 +447,11 @@ def _cut_over(
     return build_event
 
 
-def _tear_down(
+async def _tear_down(
     event: CiWebhookIn,
     wallet: str,
     name: str,
-    deletion: SyncCappDeletionClient,
+    deletion: CappDeletionClient,
 ) -> None:
     """Best-effort removal of the deployment this call created or rolled out,
     for an automation that started deleting mid-call — the same two deletions
@@ -420,8 +459,8 @@ def _tear_down(
     the wallet the call targeted. Both are delete-if-exists, so repeating the
     cascade's work is harmless. A failure leaves it for the cascade/E21 sweep."""
     try:
-        deletion.delete_capp(wallet, name)
-        deletion.delete_secret(wallet, run_auth_secret_name(event.automation_id))
+        await deletion.delete_capp(wallet, name)
+        await deletion.delete_secret(wallet, run_auth_secret_name(event.automation_id))
     except Exception as exc:  # noqa: BLE001 — best-effort, the answer stays `ignored`
         logger.warning(
             "ci-webhook: could not tear down the deployment for deleting "

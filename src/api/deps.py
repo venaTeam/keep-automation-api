@@ -15,7 +15,12 @@ import time
 from fastapi import Depends, Header, HTTPException, Request, status
 
 from src import config
-from src.bl.capp.deployment import CappClient, get_default_capp_client
+from src.bl.capp.client import CappClient
+from src.bl.capp.deployment import (
+    CappDeploymentClient,
+    CappDeploymentCoordinator,
+    UnconfiguredCappClient,
+)
 from src.bl.cascade import CascadeDeps
 from src.bl.cascade_adapters import (
     CappDeletionClient,
@@ -53,9 +58,25 @@ def get_git_client() -> GitClient:
     return build_gitlab_client()
 
 
-def get_capp_client() -> CappClient:
-    """CAPP deploy/rollout client. Fails closed until D16 wires the real one."""
-    return get_default_capp_client()
+async def get_capp_client(request: Request) -> CappDeploymentClient:
+    """Reuse the async deployment coordinator selected at startup."""
+    return request.app.state.capp_deployment_client
+
+
+def initialize_capp_deployment_client(
+    client: CappClient | UnconfiguredCappDeletionClient,
+) -> CappDeploymentClient:
+    if isinstance(client, UnconfiguredCappDeletionClient):
+        return UnconfiguredCappClient()
+    try:
+        return CappDeploymentCoordinator(
+            client,
+            readiness_timeout_seconds=config.CAPP_READINESS_TIMEOUT_SECONDS,
+            poll_interval_seconds=config.CAPP_POLL_INTERVAL_SECONDS,
+        )
+    except CappError as exc:
+        logger.warning("CAPP deployment not configured (%s)", exc.code.value)
+    return UnconfiguredCappClient()
 
 
 def get_reload_publisher() -> ReloadPublisher:
@@ -63,7 +84,7 @@ def get_reload_publisher() -> ReloadPublisher:
     return get_default_reload_publisher()
 
 
-def initialize_capp_client() -> CappDeletionClient:
+def initialize_capp_client() -> CappClient | UnconfiguredCappDeletionClient:
     """Validate startup settings and select the application's CAPP adapter."""
     try:
         return build_capp_client()

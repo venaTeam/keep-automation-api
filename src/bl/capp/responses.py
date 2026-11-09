@@ -1,5 +1,6 @@
 """Validate CAPP responses and expose only supported resource fields."""
 
+import copy
 import re
 
 from src.bl.capp.errors import CappError, CappErrorCode
@@ -11,6 +12,8 @@ from src.bl.capp.models import (
     ConditionSource,
     ConditionStatus,
 )
+
+from src.bl.capp.validation import CONFIG_FIELDS, validate_config
 
 _CONDITION_STATUSES = frozenset(ConditionStatus)
 _CONDITION_SOURCES = frozenset(ConditionSource)
@@ -89,9 +92,12 @@ def parse_capp(
 ) -> CappResource:
     if raw.get("name") != name or raw.get("namespace", namespace) != namespace:
         raise CappError(CappErrorCode.MALFORMED_RESPONSE)
+    config = {key: value for key, value in raw.items() if key in CONFIG_FIELDS}
+    validate_config(config, error_code=CappErrorCode.MALFORMED_RESPONSE)
     return CappResource(
         name=name,
         uid=required_string(raw, "uid"),
+        config=copy.deepcopy(config),
         deployment_url=_deployment_url(raw),
         image=required_string(raw, "image"),
         conditions=_conditions(raw),

@@ -9,8 +9,8 @@ custodies the single CAPP service identity.
 > The FastAPI shell, authoring CRUD, enable/disable, delete cascade, and CI
 > webhook (D15) are in place. Submit, the reconciler, and SSE payloads remain
 > stubs (D17, D19-D20). D16 provides the async CAPP resource client used by the
-> cascade; connecting D15's deployment interface to it remains integration work.
-> Until then successful CI webhooks fail closed with 503. The D18 Artifactory
+> cascade and the async D15 deployment coordinator. Successful build webhooks
+> wait for CAPP readiness before committing the digest. The D18 Artifactory
 > adapter uses A0 configuration and fails closed when it is absent.
 
 ## Database
@@ -237,7 +237,6 @@ errors, and the opt-in dev hello acceptance test.
 ## Deferred
 
 - Business endpoints (submit, reconciler, runs, SSE payloads): **D17, D19-D20**.
-- Connect D15's deployment interface to the async CAPP resource client.
 - Run-auth key column (**F24**), A0 Artifactory deployment configuration, and git archive adapter (**D14**).
 - Deploy + NetworkPolicy manifests — handled out-of-repo (A0 infra).
 - Real identity-provider integration + internal-tier token verification (the machine tier's is live since D15).

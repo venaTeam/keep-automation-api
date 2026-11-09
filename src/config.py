@@ -199,6 +199,19 @@ except (ValueError, TypeError):
     CAPP_REQUEST_TIMEOUT_SECONDS = None
 
 
+# Deployment polling policy is captured with the other startup settings.
+try:
+    CAPP_READINESS_TIMEOUT_SECONDS = float(
+        os.environ.get("CAPP_READINESS_TIMEOUT_SECONDS", "600")
+    )
+    CAPP_POLL_INTERVAL_SECONDS = float(
+        os.environ.get("CAPP_POLL_INTERVAL_SECONDS", "1")
+    )
+except (TypeError, ValueError):
+    CAPP_READINESS_TIMEOUT_SECONDS = None
+    CAPP_POLL_INTERVAL_SECONDS = None
+
+
 def load_capp_client_settings() -> dict:
     """Return startup settings; never reread the environment on a request."""
     from src.bl.capp.errors import CappError, CappErrorCode

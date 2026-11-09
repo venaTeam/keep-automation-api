@@ -72,7 +72,9 @@ async def lifespan(app: FastAPI):
     # The CI webhook fails closed on both settings; say so once at startup so
     # a misprovisioned pod is visible before CI's first red job.
     if not config.CI_WEBHOOK_TOKEN:
-        logger.warning("CI_WEBHOOK_TOKEN is not set: every CI webhook will be rejected (401)")
+        logger.warning(
+            "CI_WEBHOOK_TOKEN is not set: every CI webhook will be rejected (401)"
+        )
     from src.bl.builds import configured_image_repository
 
     if configured_image_repository() is None:
@@ -81,9 +83,12 @@ async def lifespan(app: FastAPI):
             "docker repository: every successful CI build will be refused (503) "
             "and stay building"
         )
-    from src.api.deps import initialize_capp_client
+    from src.api.deps import initialize_capp_client, initialize_capp_deployment_client
 
     app.state.capp_client = initialize_capp_client()
+    app.state.capp_deployment_client = initialize_capp_deployment_client(
+        app.state.capp_client
+    )
     try:
         yield
     finally:
@@ -91,6 +96,7 @@ async def lifespan(app: FastAPI):
         if capp_client is not None:
             await capp_client.aclose()
             del app.state.capp_client
+        del app.state.capp_deployment_client
         logger.info("Shutting down keep-automation-api")
 
 

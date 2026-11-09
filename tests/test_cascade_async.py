@@ -290,7 +290,9 @@ async def test_delete_admitted_when_capp_configuration_is_invalid(
         assert "checkpoint-2" not in calls
         assert world.publishes == 1
         assert world.capps and world.secrets and world.images
-        assert isinstance(app.state.capp_client, api_deps.UnconfiguredCappDeletionClient)
+        assert isinstance(
+            app.state.capp_client, api_deps.UnconfiguredCappDeletionClient
+        )
         await api_deps.get_capp_deletion_client(Request({"type": "http", "app": app}))
         warnings = [
             record for record in caplog.records if record.name == api_deps.__name__
@@ -369,29 +371,3 @@ async def test_created_capp_uid_is_deleted_using_its_deterministic_name(state):
         f"/api/v1/clusters/dev/namespaces/{row.namespace}/secrets/{name}-run-auth",
     ]
     assert not world.capps and not world.secrets
-
-
-async def test_webhook_cleanup_bridge_uses_owning_event_loop():
-    from fastapi.concurrency import run_in_threadpool
-    from src.bl.capp.deployment import SyncCappDeletionClient
-
-    owner = asyncio.get_running_loop()
-    calls = []
-
-    class AsyncDeletion:
-        async def delete_capp(self, wallet, name):
-            assert asyncio.get_running_loop() is owner
-            calls.append(("capp", wallet, name))
-
-        async def delete_secret(self, wallet, name):
-            assert asyncio.get_running_loop() is owner
-            calls.append(("secret", wallet, name))
-
-    bridge = SyncCappDeletionClient(AsyncDeletion())
-
-    def cleanup():
-        bridge.delete_capp("wallet", "deployment")
-        bridge.delete_secret("wallet", "secret")
-
-    await run_in_threadpool(cleanup)
-    assert calls == [("capp", "wallet", "deployment"), ("secret", "wallet", "secret")]

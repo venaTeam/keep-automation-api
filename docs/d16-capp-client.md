@@ -9,6 +9,7 @@ or invokes `/run`.
 ## Module responsibilities
 
 - `client.py` checks target URL syntax and builds resource requests.
+- `deployment.py` coordinates async D15 create/find, rollout and readiness.
 - `transport.py` owns the HTTP pool, authentication, token refresh, deadlines,
   status handling, and rejection of responses that echo passwords or tokens.
 - `responses.py` validates responses and produces typed resource results.
@@ -31,6 +32,8 @@ secret store. Never send them from an authoring request or log configuration.
 | `CAPP_USERNAME` | Required OpenShift service identity username |
 | `CAPP_PASSWORD` | Required OpenShift service identity password |
 | `CAPP_REQUEST_TIMEOUT_SECONDS` | Positive finite timeout for every HTTP call; default 30 |
+| `CAPP_READINESS_TIMEOUT_SECONDS` | Positive finite total create/rollout deadline, including polling; default 600 |
+| `CAPP_POLL_INTERVAL_SECONDS` | Positive finite interval between readiness reads; default 1 |
 | `CAPP_CLUSTER` | Required default cluster for calls that supply a wallet name |
 
 Wallet onboarding and tenant authorization belong to the calling business layer,
@@ -63,7 +66,7 @@ request = CappRequest(
 )
 async with CappClient(**load_capp_client_settings()) as client:
     resource = await client.create_capp(stored_wallet, request)
-# D15 persists resource.uid and resource.deployment_url in its own transaction.
+# For D15 use the deployment coordinator below: acceptance is not readiness.
 # Keep resource.name (deterministic automation-UUID) for later GET/PUT/DELETE.
 ```
 
@@ -203,9 +206,51 @@ D15 webhook/cutover orchestration, F25 onboarding state, and D17's invocation
 loop are intentionally outside this adapter. No dev CAPP settings were
 available during local implementation, so the live round-trip is unproven.
 
-## D15 integration boundary
+## D15 async deployment integration
 
-`src/bl/capp/deployment.py` preserves D15's synchronous deployment contract and
-its fail-closed default. It is separate from the async resource client in
-`client.py`. D15 still needs an adapter for create/find, rollout, secret mounts,
-and error mapping; this merge does not wire the raw client into that contract.
+`src/bl/capp/deployment.py` implements `CappDeploymentClient` with
+`CappDeploymentCoordinator`, sharing the app-owned async resource client. Both
+are initialized at startup. The webhook awaits build orchestration directly;
+complete snapshot/commit transactions and blocking publishers run in worker
+threads. Cleanup awaits the same async deletion client D18 uses; there is no
+sync bridge or second event loop.
+
+First creation uses `automation-{id}`. A conflict triggers GET/reconciliation in
+the requested wallet, recovering a previous create whose database commit failed.
+Matching image and managed configuration skip another PUT, so a readiness retry
+does not restart the revision. Rollout receives the wallet and automation ID,
+resolves UUID-valued deployment IDs to their deterministic resource name, and
+rejects a changed UID or a missing resource without recreating it. Legacy stored
+names remain supported. The database stores the UID and first deployment URL.
+
+Managed configuration sets `AUTOMATION_ID`, `AUTOMATION_SECRETS_PATH`, and the
+optional `automation-secrets` volume mounted at `/etc/automation/secrets`.
+Changing or removing a team Secret replaces or removes that mount. Existing
+unrelated environment variables, system Secret mounts and sizing/route settings
+survive. No team Secret values are fetched. Run-auth key provisioning/encryption
+remains F24 work; existing run-auth configuration is preserved, not generated.
+`CappResource.config` contains a validated configuration snapshot for these
+updates and is excluded from repr; callers must never log its contents.
+
+After mutation the coordinator GETs until the same UID and requested image have
+a route URL and serving readiness (Capp/Knative or legacy unsourced Ready), with
+all exposed Ready conditions true. Route readiness alone is insufficient. The
+API has no observed-generation field, so the available image/condition
+correlation cannot establish stronger revision freshness than CAPP exposes.
+The overall deadline cancels stalled calls and polling. CAPP errors/readiness
+timeouts map to sanitized 503 errors, preserving the build lock and previous
+database digest. Cancellation propagates. If deletion starts during readiness,
+cleanup uses the original wallet and resource name even when readiness fails.
+
+The existing admission/commit checks fence database cutover; they do not make
+CAPP and the database atomic or serialize different workers' external mutations.
+The low-level GET/PUT API has no compare-and-swap precondition. Cross-wallet
+orphan discovery and drift reconciliation remain E21 work: the coordinator does
+not scan wallets or maintain an onboarding registry.
+
+Coverage: `test_ci_webhook_capp.py` drives the HTTP webhook through the production
+startup dependencies, real async coordinator/resource client, mocked CAPP and
+PostgreSQL. `test_capp_deployment.py` tests readiness, secret replacement,
+conflict recovery, missing/replaced resources, cancellation and error redaction.
+The existing webhook race suite uses an async test double in
+`tests/capp_deployment_fake.py`; no test double lives in production modules.
