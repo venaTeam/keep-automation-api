@@ -3,6 +3,7 @@
 import asyncio
 import json
 import math
+import time
 from collections.abc import Callable
 from datetime import datetime, timezone
 from http import HTTPMethod, HTTPStatus
@@ -16,6 +17,7 @@ from src.bl.capp_models import JsonObject
 
 _MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 _TOKEN_REFRESH_SKEW_SECONDS = 30
+_AUTH_FAILURE_COOLDOWN_SECONDS = 5
 _SUCCESS_STATUS = {
     HTTPMethod.POST: HTTPStatus.CREATED,
     HTTPMethod.GET: HTTPStatus.OK,
@@ -67,6 +69,7 @@ class CappTransport:
         timeout_seconds: float = 30,
         transport: httpx.AsyncBaseTransport | None = None,
         clock: Callable[[], datetime] | None = None,
+        monotonic_clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._base_url = _validate_base_url(base_url)
         try:
@@ -90,6 +93,10 @@ class CappTransport:
             transport=transport,
         )
         self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._monotonic = monotonic_clock
+        # Store only sanitized metadata, never exceptions or their tracebacks.
+        self._auth_failure: tuple[CappErrorCode, int | None, bool] | None = None
+        self._auth_retry_at = 0.0
         self._auth_lock = asyncio.Lock()
         self._access_token = self._refresh_token = ""
         self._expires_at = datetime.min.replace(tzinfo=timezone.utc)
@@ -153,6 +160,17 @@ class CappTransport:
             )
             if usable and (failed_token is None or self._access_token != failed_token):
                 return self._access_token
+            if (
+                self._auth_failure is not None
+                and self._monotonic() < self._auth_retry_at
+            ):
+                code, status, retryable = self._auth_failure
+                error = (
+                    error_for_status(status)
+                    if status is not None
+                    else CappError(code, retryable=retryable)
+                )
+                raise error
             self._access_token = ""
             if self._refresh_token:
                 try:
@@ -162,9 +180,17 @@ class CappTransport:
                     return self._access_token
                 except CappError:
                     self._refresh_token = ""
-            await self._login_request(
-                "login", {"username": self._username, "password": self._password}
-            )
+            failure = None
+            try:
+                await self._login_request(
+                    "login", {"username": self._username, "password": self._password}
+                )
+            except CappError as exc:
+                self._auth_failure = (exc.code, exc.http_status, exc.retryable)
+                self._auth_retry_at = self._monotonic() + _AUTH_FAILURE_COOLDOWN_SECONDS
+                failure = exc
+            if failure is not None:
+                raise failure
             return self._access_token
 
     async def _login_request(self, operation: str, body: JsonObject) -> None:
@@ -191,6 +217,8 @@ class CappTransport:
         self._access_token = access
         self._refresh_token = refresh
         self._expires_at = expires
+        self._auth_failure = None
+        self._auth_retry_at = 0.0
 
     async def request(
         self, method: HTTPMethod, path: str, body: JsonObject | None = None

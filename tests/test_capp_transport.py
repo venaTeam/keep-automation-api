@@ -504,3 +504,92 @@ async def test_request_body_snapshot_is_preserved_across_authentication_and_retr
         result = await adapter.request(HTTPMethod.POST, "/resource", body)
     assert result == {"ok": True}
     assert sent == [b'{"value": "original"}', b'{"value": "original"}']
+
+
+@pytest.mark.parametrize(
+    "failure,code",
+    [
+        ((HTTPStatus.UNAUTHORIZED, {}), CappErrorCode.AUTHENTICATION),
+        ((HTTPStatus.SERVICE_UNAVAILABLE, {}), CappErrorCode.UNAVAILABLE),
+        (httpx.ConnectError("password-sensitive"), CappErrorCode.UNAVAILABLE),
+        (TimeoutError("password-sensitive"), CappErrorCode.TIMEOUT),
+    ],
+)
+async def test_auth_failure_cooldown_coalesces_callers_and_recovers(
+    failure, code, caplog
+):
+    now = [100.0]
+    wire = Wire(
+        [failure, (HTTPStatus.OK, tokens()), (HTTPStatus.OK, {}), (HTTPStatus.OK, {})]
+    )
+    async with transport_client(
+        base_url="https://capp.example",
+        username=IDENTITY[0],
+        password=IDENTITY[1],
+        timeout_seconds=7,
+        transport=httpx.MockTransport(wire),
+        clock=lambda: NOW,
+        monotonic_clock=lambda: now[0],
+    ) as adapter:
+        errors = await asyncio.gather(
+            *(adapter.request(HTTPMethod.GET, "/resource") for _ in range(16)),
+            return_exceptions=True
+        )
+        assert len(wire.calls) == 1
+        assert len({id(error) for error in errors}) == 16
+        for error in errors:
+            assert isinstance(error, CappError)
+            assert error.code is code
+            assert error.__context__ is None
+            assert all(
+                secret not in str(error) + str(vars(error)) + caplog.text
+                for secret in IDENTITY
+            )
+            if code is CappErrorCode.AUTHENTICATION:
+                assert isinstance(error, CappAuthenticationError)
+        now[0] = 104.9
+        with pytest.raises(CappError):
+            await adapter.request(HTTPMethod.GET, "/resource")
+        assert len(wire.calls) == 1
+        now[0] = 105.0
+        assert await adapter.request(HTTPMethod.GET, "/resource") == {}
+        assert await adapter.request(HTTPMethod.GET, "/resource") == {}
+        assert [call[1].split("/")[-1] for call in wire.calls] == [
+            "login",
+            "login",
+            "resource",
+            "resource",
+        ]
+
+
+async def test_failed_refresh_and_login_share_cooldown():
+    wire = Wire(
+        [
+            (HTTPStatus.OK, tokens()),
+            (HTTPStatus.OK, {}),
+            (HTTPStatus.UNAUTHORIZED, {}),
+            (HTTPStatus.UNAUTHORIZED, {}),
+            (HTTPStatus.UNAUTHORIZED, {}),
+        ]
+    )
+    async with transport_client(
+        base_url="https://capp.example",
+        username=IDENTITY[0],
+        password=IDENTITY[1],
+        timeout_seconds=7,
+        transport=httpx.MockTransport(wire),
+        clock=lambda: NOW,
+        monotonic_clock=lambda: 100.0,
+    ) as adapter:
+        await adapter.request(HTTPMethod.GET, "/resource")
+        with pytest.raises(CappError):
+            await adapter.request(HTTPMethod.GET, "/resource")
+        with pytest.raises(CappError):
+            await adapter.request(HTTPMethod.GET, "/resource")
+    assert [call[1].split("/")[-1] for call in wire.calls] == [
+        "login",
+        "resource",
+        "resource",
+        "refresh",
+        "login",
+    ]

@@ -16,6 +16,7 @@ from uuid import uuid4
 import pytest
 
 from src.bl.capp_client import CappClient
+from src.bl.capp_errors import CappError, CappErrorCode, error_for_status
 from src.bl.capp_models import CappRequest, SecretRequest
 from src.config import load_capp_client_settings
 
@@ -30,6 +31,22 @@ def clean_tables():
     os.environ.get("CAPP_LIVE_TEST") != "1", reason="Dev CAPP acceptance is opt-in"
 )
 async def test_dev_hello_round_trip():
+    await _hello_round_trip()
+
+
+def _failure_code(error: Exception) -> str:
+    if isinstance(error, CappError):
+        return error.code.value
+    if isinstance(error, (TimeoutError, httpx.TimeoutException)):
+        return "timeout"
+    if isinstance(error, httpx.RequestError):
+        return "unavailable"
+    if isinstance(error, (ValueError, TypeError)):
+        return "malformed_response"
+    return "unexpected_error"
+
+
+async def _hello_round_trip():
     wallet = os.environ["CAPP_HELLO_WALLET"]
     image = os.environ["CAPP_HELLO_IMAGE"]
     hostname = os.environ["CAPP_HELLO_HOSTNAME"]
@@ -61,14 +78,18 @@ async def test_dev_hello_round_trip():
             ],
         },
     )
-    adapter = CappClient(**load_capp_client_settings())
-    failure = None
-    cleanup_failed = False
+    adapter = None
+    failures = []
+    stage = "configure_client"
     try:
+        adapter = CappClient(**load_capp_client_settings())
+        stage = "create_secret"
         await adapter.create_secret(
             wallet, SecretRequest(secret_name, {"api-key": key})
         )
+        stage = "create_capp"
         await adapter.create_capp(wallet, request)
+        stage = "readiness"
         deadline = time.monotonic() + 600
         while True:
             resource = await adapter.get_capp(wallet, name)
@@ -80,12 +101,14 @@ async def test_dev_hello_round_trip():
             ):
                 break
             if time.monotonic() >= deadline:
-                raise RuntimeError("readiness deadline")
+                raise TimeoutError()
             await asyncio.sleep(5)
+        stage = "validate_route"
         if resource.deployment_url != "https://" + hostname:
-            raise RuntimeError("unexpected route")
+            raise CappError(CappErrorCode.MALFORMED_RESPONSE)
         # Service identity stays in CappClient. Invocation uses only this
         # disposable deployment's run key; no retries and no raw output.
+        stage = "invoke"
         async with httpx.AsyncClient(
             follow_redirects=False, trust_env=False
         ) as invocation:
@@ -101,23 +124,33 @@ async def test_dev_hello_round_trip():
                         "X-Attempt": "1",
                     },
                 )
-                if (
-                    response.status_code != HTTPStatus.OK
-                    or response.json().get("status") != "ok"
-                ):
-                    raise RuntimeError("hello failed")
-    except Exception:
-        # Neither transport exceptions nor response bodies may reach pytest.
-        failure = "Dev CAPP hello round-trip failed"
+                if response.status_code != HTTPStatus.OK:
+                    raise error_for_status(response.status_code)
+                payload = response.json()
+                if not isinstance(payload, dict) or payload.get("status") != "ok":
+                    raise CappError(CappErrorCode.MALFORMED_RESPONSE)
+    except Exception as exc:
+        failures.append(f"{stage}: {_failure_code(exc)}")
     finally:
-        try:
-            await adapter.delete_capp(wallet, name)
-            await adapter.delete_secret(wallet, secret_name)
-        except Exception:
-            cleanup_failed = True
-        finally:
-            await adapter.aclose()
-    if cleanup_failed:
-        pytest.fail(f"Dev CAPP cleanup failed; inspect resource {name}", pytrace=False)
-    if failure:
-        pytest.fail(failure, pytrace=False)
+        if adapter is not None:
+            try:
+                await adapter.delete_capp(wallet, name)
+            except Exception as exc:
+                failures.append(
+                    f"delete_capp: {_failure_code(exc)}; inspect {name} and {secret_name}; Secret cleanup skipped"
+                )
+            else:
+                try:
+                    await adapter.delete_secret(wallet, secret_name)
+                except Exception as exc:
+                    failures.append(
+                        f"delete_secret: {_failure_code(exc)}; inspect {secret_name}"
+                    )
+            finally:
+                try:
+                    await adapter.aclose()
+                except Exception as exc:
+                    failures.append(f"close_client: {_failure_code(exc)}")
+    # Raise only after leaving handlers: raw exceptions must not become context.
+    if failures:
+        pytest.fail("Dev CAPP hello failed: " + "; ".join(failures), pytrace=False)

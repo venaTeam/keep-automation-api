@@ -126,6 +126,13 @@ mode discovery, or cluster/token (`passthrough`) authentication implementation.
 
 Login is lazy and token refresh is serialized by a per-client `asyncio.Lock`. Refresh
 starts within 30 seconds of expiry; a failed refresh falls back to one login.
+A failed login starts a five-second cooldown on that client. Calls needing
+authentication during the cooldown fail immediately with the same sanitized error
+classification, without another login attempt. Only error metadata is retained;
+each caller receives a fresh exception. The cooldown uses a monotonic clock,
+resets on successful authentication, and is local to each app/client (not shared
+across workers or replicas). Cancellation does not start a cooldown. Per-HTTP-call
+timeouts are unchanged; this does not add an overall operation deadline.
 A 401 triggers one authentication recovery and one request replay. Timeouts,
 connection failures, and conflicts never trigger automatic mutation replay.
 Redirects are rejected. TLS verification remains enabled.
@@ -172,7 +179,11 @@ Docker; the existing database-backed lifecycle tests exercise the same async run
 `tests/test_capp_live.py` is an opt-in dev acceptance runner. It creates a unique
 run-auth Secret and hello Capp, polls readiness for up to 600 seconds, invokes
 `/run` once using only the disposable run key, and deletes both resources. It
-never passes CAPP credentials to the hosted application. It requires the
+never passes CAPP credentials to the hosted application. Failures report the stage
+and sanitized error code, without raw exception messages or response bodies.
+Cleanup errors are reported alongside the original failure. Capp deletion must
+succeed before Secret deletion is attempted; otherwise diagnostics identify both
+resources for inspection and explicitly report that Secret cleanup was skipped. It requires the
 approved hello image to read `/etc/automation/run-auth/api-key` and implement
 the golden wrapper's `X-API-Key` check. The supplied documents contain older
 env-var-based run-auth text; this implementation follows the newer D16
