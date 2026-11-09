@@ -1,6 +1,8 @@
 """`automation_revisions` — human-attributed change log (spec §4.4): one row
 per definition-affecting action, since git commits are made by the single
 backend identity. Enum values pinned in automation-contracts.md §"DB enums".
+Build outcomes (D15) are the one machine-attributed exception: each applied CI
+webhook writes a `build_succeeded` / `build_failed` row (spec §8.4).
 
 **No `tenant_id` here, deliberately** (unlike `automation_runs`): a revision is
 only ever reached through its parent automation, so `automation_id` →
@@ -23,6 +25,10 @@ class RevisionAction(str, Enum):
     ENABLE = "enable"
     DISABLE = "disable"
     DELETE = "delete"
+    # CI webhook outcomes (D15) — machine-attributed (`actor` = "ci-webhook"),
+    # `git_sha` = the built commit, `resulting_digest` set on success only.
+    BUILD_SUCCEEDED = "build_succeeded"
+    BUILD_FAILED = "build_failed"
 
 
 class AutomationRevision(SQLModel, table=True):

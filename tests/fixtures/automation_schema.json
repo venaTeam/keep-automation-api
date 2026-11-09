@@ -17,7 +17,9 @@
             "edit",
             "enable",
             "disable",
-            "delete"
+            "delete",
+            "build_succeeded",
+            "build_failed"
           ],
           "name": "action",
           "nullable": false,

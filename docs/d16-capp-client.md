@@ -202,3 +202,10 @@ poetry run pytest tests/test_capp_live.py -q
 D15 webhook/cutover orchestration, F25 onboarding state, and D17's invocation
 loop are intentionally outside this adapter. No dev CAPP settings were
 available during local implementation, so the live round-trip is unproven.
+
+## D15 integration boundary
+
+`src/bl/capp/deployment.py` preserves D15's synchronous deployment contract and
+its fail-closed default. It is separate from the async resource client in
+`client.py`. D15 still needs an adapter for create/find, rollout, secret mounts,
+and error mapping; this merge does not wire the raw client into that contract.
