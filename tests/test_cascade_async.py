@@ -293,7 +293,7 @@ async def test_delete_admitted_when_capp_configuration_is_invalid(
         assert isinstance(
             app.state.capp_client, api_deps.UnconfiguredCappDeletionClient
         )
-        await api_deps.get_capp_deletion_client(Request({"type": "http", "app": app}))
+        await api_deps.get_capp_resource_client(Request({"type": "http", "app": app}))
         warnings = [
             record for record in caplog.records if record.name == api_deps.__name__
         ]
@@ -312,7 +312,7 @@ async def test_delete_admitted_when_capp_configuration_is_invalid(
             float(value) if key == "CAPP_REQUEST_TIMEOUT_SECONDS" else value,
         )
     async with lifespan(app):
-        actual = await api_deps.get_capp_deletion_client(
+        actual = await api_deps.get_capp_resource_client(
             Request({"type": "http", "app": app})
         )
         assert isinstance(actual, CappClient)

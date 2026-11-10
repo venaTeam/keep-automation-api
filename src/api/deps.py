@@ -63,11 +63,6 @@ async def get_capp_deployment_client(request: Request) -> CappDeploymentClient:
     return request.app.state.capp_deployment_client
 
 
-# Compatibility aliases for existing dependency overrides during the D15/D16
-# transition. Routes use the role-specific names below.
-get_capp_client = get_capp_deployment_client
-
-
 def initialize_capp_deployment_client(
     client: CappClient | UnconfiguredCappDeletionClient,
 ) -> CappDeploymentClient:
@@ -103,9 +98,6 @@ def initialize_capp_client() -> CappClient | UnconfiguredCappDeletionClient:
 async def get_capp_resource_client(request: Request) -> CappDeletionClient:
     """Return the adapter initialized by application startup."""
     return request.app.state.capp_client
-
-
-get_capp_deletion_client = get_capp_resource_client
 
 
 def get_event_publisher() -> AutomationEventPublisher:

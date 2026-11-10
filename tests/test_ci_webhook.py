@@ -21,7 +21,7 @@ from src.api import deps
 from src.api.ci_webhook_guard import CI_WEBHOOK_PATH, CiWebhookGuard
 from src.api.deps import (
     get_authenticated_entity,
-    get_capp_client,
+    get_capp_deployment_client,
     get_event_publisher,
     get_git_client,
     get_reload_publisher,
@@ -146,7 +146,7 @@ def harness(test_engine):
     reload = RecordingReload()
     events = RecordingEvents()
     app.dependency_overrides[get_git_client] = lambda: git
-    app.dependency_overrides[get_capp_client] = lambda: capp
+    app.dependency_overrides[get_capp_deployment_client] = lambda: capp
     app.dependency_overrides[get_reload_publisher] = lambda: reload
     app.dependency_overrides[get_event_publisher] = lambda: events
     with TestClient(app) as client:
@@ -823,7 +823,7 @@ def test_production_default_capp_client_fails_closed(test_engine):
     app.dependency_overrides[get_git_client] = lambda: git
     app.dependency_overrides[get_reload_publisher] = lambda: RecordingReload()
     app.dependency_overrides[get_event_publisher] = lambda: RecordingEvents()
-    assert deps.get_capp_client not in app.dependency_overrides
+    assert deps.get_capp_deployment_client not in app.dependency_overrides
     with TestClient(app) as client:
         created = client.post("/automations", json=AUTOMATION).json()
         sha = row(test_engine, created["id"])["building_sha"]
@@ -990,7 +990,7 @@ def test_unstored_create_then_wallet_edit_redeploys_in_the_new_wallet(
     old_deployment = probe.deployments[created["id"]].deployment_id
 
     probe.during_call = None
-    harness.client.app.dependency_overrides[get_capp_client] = lambda: probe
+    harness.client.app.dependency_overrides[get_capp_deployment_client] = lambda: probe
     sha = row(test_engine, created["id"])["building_sha"]
     calls_before = len(probe.calls)
     assert harness.webhook(success(created["id"], sha)).json() == {"status": "applied"}
@@ -1310,7 +1310,7 @@ def test_redelivery_after_a_raced_failure_and_a_503_is_ignored_and_logged(
         monkeypatch.setattr(builds, "lock_first", broken)
 
     capp = _ProbingCapp(test_engine, fail_then_break_the_db)
-    harness.client.app.dependency_overrides[get_capp_client] = lambda: capp
+    harness.client.app.dependency_overrides[get_capp_deployment_client] = lambda: capp
     with caplog.at_level(logging.WARNING):
         assert harness.webhook(success(created["id"], sha)).status_code == 503
     assert "CAPP ahead of row" in caplog.text

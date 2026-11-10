@@ -408,7 +408,7 @@ async def test_d18_resolves_uid_and_legacy_name():
 
 async def test_default_d18_client_uses_server_configuration(monkeypatch):
     from fastapi import FastAPI, Request
-    from src.api.deps import get_capp_deletion_client
+    from src.api.deps import get_capp_resource_client
 
     from src import config
 
@@ -422,9 +422,9 @@ async def test_default_d18_client_uses_server_configuration(monkeypatch):
     from src.main import lifespan
 
     async with lifespan(app):
-        adapter = await get_capp_deletion_client(request)
+        adapter = await get_capp_resource_client(request)
         assert isinstance(adapter, CappClient)
-        assert adapter is await get_capp_deletion_client(request)
+        assert adapter is await get_capp_resource_client(request)
         with pytest.raises(CappError, match="invalid_target"):
             await adapter.delete_capp("../invalid", NAME)
 
@@ -476,7 +476,7 @@ async def test_app_lifespan_closes_its_client_and_does_not_share_across_apps(
     monkeypatch,
 ):
     from fastapi import FastAPI, Request
-    from src.api.deps import get_capp_deletion_client
+    from src.api.deps import get_capp_resource_client
     from src.main import lifespan
 
     from unittest.mock import AsyncMock
@@ -493,10 +493,10 @@ async def test_app_lifespan_closes_its_client_and_does_not_share_across_apps(
     first_app, second_app = FastAPI(), FastAPI()
     async with lifespan(first_app), lifespan(second_app):
         assert len(clients) == 2  # Both clients exist before the first request.
-        first = await get_capp_deletion_client(
+        first = await get_capp_resource_client(
             Request({"type": "http", "app": first_app})
         )
-        second = await get_capp_deletion_client(
+        second = await get_capp_resource_client(
             Request({"type": "http", "app": second_app})
         )
         assert first is not second

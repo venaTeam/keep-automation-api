@@ -117,7 +117,7 @@ def real_backend(test_engine, monkeypatch):
 @pytest.fixture
 def wire_harness(real_backend, harness):
     # Exercise the production startup dependency, not a coordinator override.
-    harness.client.app.dependency_overrides.pop(deps.get_capp_client)
+    harness.client.app.dependency_overrides.pop(deps.get_capp_deployment_client)
     return harness, real_backend
 
 

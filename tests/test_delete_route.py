@@ -8,7 +8,7 @@ import pytest
 from fastapi.routing import APIRoute
 from sqlalchemy import text
 
-from src.api.deps import get_capp_deletion_client, get_git_client, get_registry_client
+from src.api.deps import get_capp_resource_client, get_git_client, get_registry_client
 from src.bl import cascade
 from src.main import get_app
 from tests.conftest import OTHER_TENANT, TENANT
@@ -28,7 +28,7 @@ def app_overrides(app_overrides, world):
     deps = deps_for(world)
     return {
         **app_overrides,
-        get_capp_deletion_client: lambda: deps.capp,
+        get_capp_resource_client: lambda: deps.capp,
         get_registry_client: lambda: deps.registry,
         get_git_client: lambda: deps.git,
     }
