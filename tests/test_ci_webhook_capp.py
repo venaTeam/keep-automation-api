@@ -176,18 +176,15 @@ def test_failed_rollout_retains_digest_and_build_lock(
     response = harness.webhook(
         success(automation_id, before["building_sha"], version=2)
     )
-    assert response.status_code == (200 if failure == "permanent" else 503)
+    # Authorization failures are transient platform outages, including when
+    # they happen after CAPP accepted the rollout mutation.
+    assert response.status_code == 503
     after = row(test_engine, automation_id)
     for key in ("active_digest", "capp_deployment_id", "deployment_url"):
         assert after[key] == before[key]
-    if failure == "permanent":
-        assert after["build_state"] == "build_failed"
-        assert after["building_sha"] is None
-        assert after["build_lock_deadline"] is None
-    else:
-        assert after["build_state"] == "building"
-        assert after["building_sha"] == before["building_sha"]
-        assert after["build_lock_deadline"] == before["build_lock_deadline"]
+    assert after["build_state"] == "building"
+    assert after["building_sha"] == before["building_sha"]
+    assert after["build_lock_deadline"] == before["build_lock_deadline"]
     assert all(secret not in response.text + caplog.text for secret in IDENTITY)
 
 

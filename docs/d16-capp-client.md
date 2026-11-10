@@ -44,6 +44,10 @@ CAPP settings are read once when `src.config` is imported during process startup
 like the other environment settings. Changing the default cluster, endpoint,
 timeout, or credentials requires restarting workers.
 
+The CI caller must retry a `503` webhook response with bounded exponential
+backoff until the build lock deadline. The readiness window is per delivery,
+so a cold image pull can legitimately require a later delivery.
+
 ## Callers
 
 ```python
@@ -90,13 +94,19 @@ documented in `caap.yaml`; the wire schema has no client-side version preconditi
 Therefore the client cannot guarantee compare-and-swap against its earlier GET.
 Existing Capps may be enabled or disabled. An omitted state preserves the current
 state; explicitly requesting enabled re-enables a disabled Capp. Explicit disable
-requests remain rejected by this client. Callers must serialize rollouts. A returned 409 is a typed conflict, never retried.
+requests remain rejected by this client. Callers must serialize rollouts. A
+concurrent update conflict is transient; identity mismatches remain permanent.
 
 An accepted PUT is **not** readiness confirmation. D15/F25 must inspect the
 requested image and Ready conditions, retain the build lock and old active
 digest on failure, and let the reconciler inspect ambiguous mutations before
 retrying. CAPP owns traffic switching and retaining the old serving revision.
 The local mocked tests cannot prove that external traffic behavior.
+
+Errors after CAPP accepts a create or update, including authorization failures
+during readiness polling, remain retryable so reconciliation can restore the
+durable row. Only a rejection before the mutation is accepted becomes a
+permanent build failure.
 
 Application startup validates CAPP settings and constructs one client per app.
 Missing or invalid settings log a sanitized warning once at startup and select an
@@ -133,13 +143,14 @@ mode discovery, or cluster/token (`passthrough`) authentication implementation.
 
 Login is lazy and token refresh is serialized by a per-client `asyncio.Lock`. Refresh
 starts within 30 seconds of expiry; a failed refresh falls back to one login.
-A failed login starts a five-second cooldown on that client. Calls needing
-authentication during the cooldown fail immediately with the same sanitized error
-classification, without another login attempt. Only error metadata is retained;
-each caller receives a fresh exception. The cooldown uses a monotonic clock,
-resets on successful authentication, and is local to each app/client (not shared
-across workers or replicas). Cancellation does not start a cooldown. Per-HTTP-call
-timeouts are unchanged; this does not add an overall operation deadline.
+A failed login starts an exponential cooldown on that client, from five seconds
+up to one minute. Calls needing authentication during the cooldown fail
+immediately with the same sanitized error classification, without another login
+attempt. Only error metadata is retained; each caller receives a fresh
+exception. The cooldown uses a monotonic clock, resets on successful
+authentication, and is local to each app/client (not shared across workers or
+replicas). Cancellation does not start a cooldown. Per-HTTP-call timeouts are
+unchanged; this does not add an overall operation deadline.
 A 401 triggers one authentication recovery and one request replay. Timeouts,
 connection failures, and conflicts never trigger automatic mutation replay.
 Redirects are rejected. TLS verification remains enabled.

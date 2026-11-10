@@ -302,10 +302,17 @@ async def apply_build_result(
                 secret_refs=secret_refs,
             )
             capp_accepted = True
-    except CappPermanentError:
-        # A rejected image, wallet, target, or permanently unready deployment
-        # cannot be repaired by redelivery. Record build_failed and release the
-        # lock; a new edit is required.
+    except CappPermanentError as exc:
+        # A mutation rejected before CAPP accepted it cannot be repaired by
+        # redelivery. Record build_failed and release the lock; a new edit is
+        # required. Readiness and post-mutation failures stay retryable.
+        logger.warning(
+            "ci-webhook CAPP %s rejected (%s): automation=%s sha=%s",
+            operation,
+            exc.code,
+            event.automation_id,
+            event.commit_sha,
+        )
         if await _deletion_started(event):
             await _tear_down(
                 event,

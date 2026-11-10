@@ -201,6 +201,10 @@ automation's build finishes. Payload, responses and the SSE event shape are in
 | `CAPP_READINESS_TIMEOUT_SECONDS` | `30` | Maximum readiness wait per webhook request; timeout returns 503 and keeps the build locked. |
 | `CAPP_POLL_INTERVAL_SECONDS` | `1` | Delay between CAPP readiness reads. |
 
+CI must retry `503` webhook responses with bounded exponential backoff through
+the build-lock deadline; readiness timeout is per delivery and cold image pulls
+may require a later delivery.
+
 Every applied outcome writes an `automation_revisions` row (`build_succeeded` /
 `build_failed`, actor `ci-webhook`). Those enum values need keep-migrations
 revision `revision_action_build_outcomes` applied **before** this service

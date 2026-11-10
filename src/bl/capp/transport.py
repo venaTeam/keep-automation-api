@@ -18,6 +18,7 @@ from src.bl.capp.models import JsonObject
 _MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 _TOKEN_REFRESH_SKEW_SECONDS = 30
 _AUTH_FAILURE_COOLDOWN_SECONDS = 5
+_AUTH_FAILURE_MAX_COOLDOWN_SECONDS = 60
 _SUCCESS_STATUS = {
     HTTPMethod.POST: HTTPStatus.CREATED,
     HTTPMethod.GET: HTTPStatus.OK,
@@ -96,6 +97,7 @@ class CappTransport:
         # Store only sanitized metadata, never exceptions or their tracebacks.
         self._auth_failure: tuple[CappErrorCode, int | None, bool] | None = None
         self._auth_retry_at = 0.0
+        self._auth_failures = 0
         self._auth_lock = asyncio.Lock()
         self._access_token = self._refresh_token = ""
         self._expires_at = datetime.min.replace(tzinfo=timezone.utc)
@@ -186,7 +188,12 @@ class CappTransport:
                 )
             except CappError as exc:
                 self._auth_failure = (exc.code, exc.http_status, exc.retryable)
-                self._auth_retry_at = self._monotonic() + _AUTH_FAILURE_COOLDOWN_SECONDS
+                self._auth_failures += 1
+                cooldown = min(
+                    _AUTH_FAILURE_MAX_COOLDOWN_SECONDS,
+                    _AUTH_FAILURE_COOLDOWN_SECONDS * 2 ** (self._auth_failures - 1),
+                )
+                self._auth_retry_at = self._monotonic() + cooldown
                 failure = exc
             if failure is not None:
                 raise failure
@@ -218,6 +225,7 @@ class CappTransport:
         self._expires_at = expires
         self._auth_failure = None
         self._auth_retry_at = 0.0
+        self._auth_failures = 0
 
     async def request(
         self, method: HTTPMethod, path: str, body: JsonObject | None = None

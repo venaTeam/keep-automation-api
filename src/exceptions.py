@@ -89,3 +89,7 @@ class CappPermanentError(CappUnavailableError):
     D15 records the build as failed and releases its build lock. The message is
     intentionally stable and never contains upstream response text.
     """
+
+    def __init__(self, message: str = "CAPP rejection", *, code: str = "unknown") -> None:
+        self.code = code
+        super().__init__(message)

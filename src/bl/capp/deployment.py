@@ -34,6 +34,13 @@ class CappDeployment:
     deployment_url: str
 
 
+class _DeploymentIdentityConflict(CappError):
+    """The resource changed identity while this deployment was in flight."""
+
+    def __init__(self) -> None:
+        super().__init__(CappErrorCode.CONFLICT)
+
+
 class CappDeploymentClient(Protocol):
     async def create_deployment(
         self, *, automation_id: UUID, wallet: str, image: str, secret_refs: list[str]
@@ -132,6 +139,8 @@ class CappDeploymentCoordinator:
     ) -> CappDeployment:
         name = capp_name_for(automation_id, None)
         permanent = False
+        permanent_code = "unknown"
+        mutation_accepted = False
         try:
             async with asyncio.timeout(self._timeout):
                 try:
@@ -144,13 +153,17 @@ class CappDeploymentCoordinator:
                     resource = await self._reconcile(
                         automation_id, wallet, name, image, secret_refs
                     )
+                    mutation_accepted = True
+                else:
+                    mutation_accepted = True
                 ready = await self._wait_ready(wallet, name, resource.uid, image)
                 return CappDeployment(ready.name, ready.deployment_url)
         except (CappError, TimeoutError) as exc:
-            if self._permanent(exc):
+            if self._permanent(exc, mutation_accepted=mutation_accepted):
                 permanent = True
+                permanent_code = exc.code.value
         if permanent:
-            raise CappPermanentError("CAPP rejected the deployment")
+            raise CappPermanentError("CAPP rejected the deployment", code=permanent_code)
         # Outside the handler: raw errors/tracebacks must not be chained into
         # webhook exceptions, logs or HTTP responses. Cancellation propagates.
         raise CappUnavailableError("CAPP deployment failed or readiness timed out")
@@ -166,6 +179,8 @@ class CappDeploymentCoordinator:
     ) -> None:
         name = capp_name_for(automation_id, deployment_id)
         permanent = False
+        permanent_code = "unknown"
+        mutation_accepted = False
         try:
             async with asyncio.timeout(self._timeout):
                 resource = await self._reconcile(
@@ -176,13 +191,15 @@ class CappDeploymentCoordinator:
                     secret_refs,
                     expected_id=deployment_id,
                 )
+                mutation_accepted = True
                 await self._wait_ready(wallet, name, resource.uid, image)
                 return
         except (CappError, TimeoutError) as exc:
-            if self._permanent(exc):
+            if self._permanent(exc, mutation_accepted=mutation_accepted):
                 permanent = True
+                permanent_code = exc.code.value
         if permanent:
-            raise CappPermanentError("CAPP rejected the rollout")
+            raise CappPermanentError("CAPP rejected the rollout", code=permanent_code)
         raise CappUnavailableError("CAPP rollout failed or readiness timed out")
 
     async def _reconcile(
@@ -198,14 +215,14 @@ class CappDeploymentCoordinator:
         # Accept legacy rows that stored the UID; new rows store the stable
         # deterministic resource name so replacement UIDs do not break rollout.
         if expected_id is not None and expected_id not in (current.name, current.uid):
-            raise CappError(CappErrorCode.CONFLICT)
+            raise _DeploymentIdentityConflict()
         spec = _request(automation_id, name, image, secret_refs, current)
         # Replaying an accepted update must not continuously start new revisions.
         if current.image == image and self._managed_config_matches(current, spec):
             return current
         updated = await self._client.update_capp(wallet, name, spec)
         if updated.uid != current.uid:
-            raise CappError(CappErrorCode.CONFLICT)
+            raise _DeploymentIdentityConflict()
         return updated
 
     @staticmethod
@@ -243,17 +260,25 @@ class CappDeploymentCoordinator:
             ),
             None,
         )
-        return current_env == requested_env and current_volume == requested_volume
+        return (
+            config.get("state") == "enabled"
+            and current_env == requested_env
+            and current_volume == requested_volume
+        )
 
     @staticmethod
-    def _permanent(error: CappError | TimeoutError) -> bool:
-        return isinstance(error, CappError) and error.code in {
+    def _permanent(
+        error: CappError | TimeoutError, *, mutation_accepted: bool
+    ) -> bool:
+        if not isinstance(error, CappError) or mutation_accepted:
+            return False
+        if error.code in {CappErrorCode.AUTHORIZATION, CappErrorCode.CONFLICT}:
+            return isinstance(error, _DeploymentIdentityConflict)
+        return error.code in {
             CappErrorCode.INVALID_REQUEST,
-            CappErrorCode.AUTHORIZATION,
             CappErrorCode.NOT_FOUND,
             CappErrorCode.INVALID_TARGET,
             CappErrorCode.CONFIGURATION,
-            CappErrorCode.CONFLICT,
         }
 
     async def _wait_ready(
@@ -262,7 +287,7 @@ class CappDeploymentCoordinator:
         while True:
             resource = await self._client.get_capp(wallet, name)
             if resource.uid != uid:
-                raise CappError(CappErrorCode.CONFLICT)
+                raise _DeploymentIdentityConflict()
             ready = [
                 condition
                 for condition in resource.conditions
