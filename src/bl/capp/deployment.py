@@ -21,7 +21,7 @@ from src.bl.capp.models import (
     ConditionStatus,
 )
 from src.bl.cascade_adapters import capp_name_for
-from src.exceptions import CappUnavailableError
+from src.exceptions import CappPermanentError, CappUnavailableError
 
 _SECRETS_PATH = "/etc/automation/secrets"
 _TEAM_VOLUME = "automation-secrets"
@@ -73,7 +73,7 @@ def _request(
     env = [
         entry
         for entry in previous.get("env", []) or []
-        if entry["name"] not in _MANAGED_ENV
+        if isinstance(entry, dict) and entry.get("name") not in _MANAGED_ENV
     ]
     env.extend(
         [
@@ -84,7 +84,7 @@ def _request(
     volumes = [
         entry
         for entry in previous.get("secretVolumes", []) or []
-        if entry["name"] != _TEAM_VOLUME
+        if isinstance(entry, dict) and entry.get("name") != _TEAM_VOLUME
     ]
     if secret_refs:
         volumes.append(
@@ -111,7 +111,7 @@ class CappDeploymentCoordinator:
         self,
         client: CappClient,
         *,
-        readiness_timeout_seconds: float = 600,
+        readiness_timeout_seconds: float = 30,
         poll_interval_seconds: float = 1,
     ) -> None:
         try:
@@ -131,6 +131,7 @@ class CappDeploymentCoordinator:
         self, *, automation_id: UUID, wallet: str, image: str, secret_refs: list[str]
     ) -> CappDeployment:
         name = capp_name_for(automation_id, None)
+        permanent = False
         try:
             async with asyncio.timeout(self._timeout):
                 try:
@@ -144,9 +145,12 @@ class CappDeploymentCoordinator:
                         automation_id, wallet, name, image, secret_refs
                     )
                 ready = await self._wait_ready(wallet, name, resource.uid, image)
-                return CappDeployment(ready.uid, ready.deployment_url)
-        except (CappError, TimeoutError):
-            pass
+                return CappDeployment(ready.name, ready.deployment_url)
+        except (CappError, TimeoutError) as exc:
+            if self._permanent(exc):
+                permanent = True
+        if permanent:
+            raise CappPermanentError("CAPP rejected the deployment")
         # Outside the handler: raw errors/tracebacks must not be chained into
         # webhook exceptions, logs or HTTP responses. Cancellation propagates.
         raise CappUnavailableError("CAPP deployment failed or readiness timed out")
@@ -161,6 +165,7 @@ class CappDeploymentCoordinator:
         secret_refs: list[str],
     ) -> None:
         name = capp_name_for(automation_id, deployment_id)
+        permanent = False
         try:
             async with asyncio.timeout(self._timeout):
                 resource = await self._reconcile(
@@ -173,8 +178,11 @@ class CappDeploymentCoordinator:
                 )
                 await self._wait_ready(wallet, name, resource.uid, image)
                 return
-        except (CappError, TimeoutError):
-            pass
+        except (CappError, TimeoutError) as exc:
+            if self._permanent(exc):
+                permanent = True
+        if permanent:
+            raise CappPermanentError("CAPP rejected the rollout")
         raise CappUnavailableError("CAPP rollout failed or readiness timed out")
 
     async def _reconcile(
@@ -187,18 +195,66 @@ class CappDeploymentCoordinator:
         expected_id: str | None = None,
     ) -> CappResource:
         current = await self._client.get_capp(wallet, name)
-        if expected_id is not None and expected_id not in (current.uid, current.name):
+        # Accept legacy rows that stored the UID; new rows store the stable
+        # deterministic resource name so replacement UIDs do not break rollout.
+        if expected_id is not None and expected_id not in (current.name, current.uid):
             raise CappError(CappErrorCode.CONFLICT)
         spec = _request(automation_id, name, image, secret_refs, current)
         # Replaying an accepted update must not continuously start new revisions.
-        if current.image == image and all(
-            current.config.get(key) == value for key, value in spec.config.items()
-        ):
+        if current.image == image and self._managed_config_matches(current, spec):
             return current
         updated = await self._client.update_capp(wallet, name, spec)
         if updated.uid != current.uid:
             raise CappError(CappErrorCode.CONFLICT)
         return updated
+
+    @staticmethod
+    def _managed_config_matches(current: CappResource, requested: CappRequest) -> bool:
+        """Compare only fields owned by this coordinator, normalized for CAPP."""
+        config = current.config
+        current_env = {
+            (entry.get("name"), entry.get("value"))
+            for entry in config.get("env", []) or []
+            if isinstance(entry, dict) and entry.get("name") in _MANAGED_ENV
+        }
+        requested_env = {
+            (entry["name"], entry.get("value"))
+            for entry in requested.config.get("env", [])
+        }
+        current_volume = next(
+            (
+                {
+                    "secretName": entry.get("secretName"),
+                    "mountPath": entry.get("mountPath"),
+                }
+                for entry in config.get("secretVolumes", []) or []
+                if isinstance(entry, dict) and entry.get("name") == _TEAM_VOLUME
+            ),
+            None,
+        )
+        requested_volume = next(
+            (
+                {
+                    "secretName": entry.get("secretName"),
+                    "mountPath": entry.get("mountPath"),
+                }
+                for entry in requested.config.get("secretVolumes", [])
+                if entry.get("name") == _TEAM_VOLUME
+            ),
+            None,
+        )
+        return current_env == requested_env and current_volume == requested_volume
+
+    @staticmethod
+    def _permanent(error: CappError | TimeoutError) -> bool:
+        return isinstance(error, CappError) and error.code in {
+            CappErrorCode.INVALID_REQUEST,
+            CappErrorCode.AUTHORIZATION,
+            CappErrorCode.NOT_FOUND,
+            CappErrorCode.INVALID_TARGET,
+            CappErrorCode.CONFIGURATION,
+            CappErrorCode.CONFLICT,
+        }
 
     async def _wait_ready(
         self, wallet: str, name: str, uid: str, image: str

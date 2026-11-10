@@ -109,7 +109,7 @@ async def test_create_waits_for_matching_image_serving_readiness_and_url():
     ]
     async with coordinator(replies) as (client, wire):
         result = await client.create_deployment(**create_args())
-    assert result.deployment_id == UID
+    assert result.deployment_id == NAME
     assert result.deployment_url == "https://hello.example"
     assert len(wire.calls) == 7
     body = wire.calls[1][2]
@@ -131,7 +131,7 @@ async def test_create_conflict_reconciles_existing_resource_without_second_creat
         ]
     ) as (client, wire):
         result = await client.create_deployment(**create_args())
-    assert result.deployment_id == UID
+    assert result.deployment_id == NAME
     assert [call[0] for call in wire.calls] == [
         "POST",
         "POST",

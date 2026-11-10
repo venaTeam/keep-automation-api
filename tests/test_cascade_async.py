@@ -360,11 +360,11 @@ async def test_created_capp_uid_is_deleted_using_its_deterministic_name(state):
         clock=lambda: NOW,
     ) as client:
         created = await client.create_capp(row.namespace, CappRequest(name, IMAGE))
-        row.capp_deployment_id = created.uid
+        row.capp_deployment_id = created.name
         result = await cascade.run_cascade(
             row.id, cascade.CascadeDeps(client, deps.registry, deps.git, deps.publisher)
         )
-    assert row.capp_deployment_id == uid
+    assert row.capp_deployment_id == name
     assert result.completed
     assert deletes == [
         f"/api/v1/clusters/dev/namespaces/{row.namespace}/capps/{name}",

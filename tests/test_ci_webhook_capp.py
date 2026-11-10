@@ -79,7 +79,8 @@ class CappBackend:
             return httpx.Response(404)
         if method == "PUT":
             if self.fail_put:
-                return httpx.Response(503, json={"message": IDENTITY[1]})
+                status = 403 if self.fail_put == "permanent" else 503
+                return httpx.Response(status, json={"message": IDENTITY[1]})
             self.resources[key].update(body)
             return httpx.Response(200, json=self.resources[key])
         assert method == "GET"
@@ -141,7 +142,7 @@ def test_real_create_records_uid_url_then_rollout_removes_secret(
         event.remove(test_engine, "before_cursor_execute", sql)
     deployed = row(test_engine, automation_id)
     resource = backend.resources[("payments-wallet", "automation-" + automation_id)]
-    assert deployed["capp_deployment_id"] == resource["uid"]
+    assert deployed["capp_deployment_id"] == resource["name"]
     assert deployed["deployment_url"] == "https://automation.example"
     assert deployed["active_digest"] == image(automation_id)
     assert resource["secretVolumes"][0]["secretName"] == "payments-secret"
@@ -159,7 +160,7 @@ def test_real_create_records_uid_url_then_rollout_removes_secret(
     )
 
 
-@pytest.mark.parametrize("failure", ["upstream", "readiness"])
+@pytest.mark.parametrize("failure", ["upstream", "readiness", "permanent"])
 def test_failed_rollout_retains_digest_and_build_lock(
     wire_harness, test_engine, failure, caplog
 ):
@@ -170,22 +171,23 @@ def test_failed_rollout_retains_digest_and_build_lock(
     assert harness.webhook(success(automation_id, sha)).status_code == 200
     harness.edit(automation_id)
     before = row(test_engine, automation_id)
-    backend.fail_put = failure == "upstream"
+    backend.fail_put = "permanent" if failure == "permanent" else failure == "upstream"
     backend.pending = failure == "readiness"
     response = harness.webhook(
         success(automation_id, before["building_sha"], version=2)
     )
-    assert response.status_code == 503
+    assert response.status_code == (200 if failure == "permanent" else 503)
     after = row(test_engine, automation_id)
-    for key in (
-        "active_digest",
-        "capp_deployment_id",
-        "deployment_url",
-        "building_sha",
-        "build_lock_deadline",
-    ):
+    for key in ("active_digest", "capp_deployment_id", "deployment_url"):
         assert after[key] == before[key]
-    assert after["build_state"] == "building"
+    if failure == "permanent":
+        assert after["build_state"] == "build_failed"
+        assert after["building_sha"] is None
+        assert after["build_lock_deadline"] is None
+    else:
+        assert after["build_state"] == "building"
+        assert after["building_sha"] == before["building_sha"]
+        assert after["build_lock_deadline"] == before["build_lock_deadline"]
     assert all(secret not in response.text + caplog.text for secret in IDENTITY)
 
 
@@ -204,10 +206,10 @@ def test_retry_after_database_failure_recovers_created_resource(
     monkeypatch.setattr(builds, "_cut_over", fail_commit)
     assert harness.webhook(payload).status_code == 503
     assert row(test_engine, automation_id)["capp_deployment_id"] is None
-    uid = next(iter(backend.resources.values()))["uid"]
+    deployment_name = next(iter(backend.resources.values()))["name"]
     monkeypatch.setattr(builds, "_cut_over", original)
     assert harness.webhook(payload).status_code == 200
-    assert row(test_engine, automation_id)["capp_deployment_id"] == uid
+    assert row(test_engine, automation_id)["capp_deployment_id"] == deployment_name
     assert len(backend.resources) == 1
     assert not any(method == "PUT" for method, _, _ in backend.calls)
 

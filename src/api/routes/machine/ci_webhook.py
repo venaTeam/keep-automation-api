@@ -16,8 +16,8 @@ from fastapi import APIRouter, Depends, status
 
 from src.api.ci_webhook_guard import CI_WEBHOOK_PATH
 from src.api.deps import (
-    get_capp_client,
-    get_capp_deletion_client,
+    get_capp_deployment_client,
+    get_capp_resource_client,
     get_event_publisher,
     get_reload_publisher,
     verify_ci_webhook_token,
@@ -41,10 +41,10 @@ router = APIRouter(dependencies=[Depends(verify_ci_webhook_token)])
 )
 async def ci_webhook(
     body: CiWebhookIn,
-    capp: CappDeploymentClient = Depends(get_capp_client),
+    capp: CappDeploymentClient = Depends(get_capp_deployment_client),
     reload: ReloadPublisher = Depends(get_reload_publisher),
     events: AutomationEventPublisher = Depends(get_event_publisher),
-    deletion: CappDeletionClient = Depends(get_capp_deletion_client),
+    deletion: CappDeletionClient = Depends(get_capp_resource_client),
 ) -> CiWebhookOut:
     return await builds.apply_build_result(
         body,

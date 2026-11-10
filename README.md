@@ -198,6 +198,8 @@ automation's build finishes. Payload, responses and the SSE event shape are in
 | `AUTOMATION_RELOAD_CHANNEL` | `reload` | Must match keep-event-handler's subscriber. |
 | `AUTOMATION_EVENTS_CHANNEL` | `automation-events` | Build events for the `GET /events` SSE stream (D19 subscribes). |
 | `REDIS_PUBLISH_TIMEOUT_SECONDS` | `1.0` | Bounds each publish; failures are logged and swallowed. |
+| `CAPP_READINESS_TIMEOUT_SECONDS` | `30` | Maximum readiness wait per webhook request; timeout returns 503 and keeps the build locked. |
+| `CAPP_POLL_INTERVAL_SECONDS` | `1` | Delay between CAPP readiness reads. |
 
 Every applied outcome writes an `automation_revisions` row (`build_succeeded` /
 `build_failed`, actor `ci-webhook`). Those enum values need keep-migrations

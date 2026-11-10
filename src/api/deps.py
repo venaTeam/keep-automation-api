@@ -58,9 +58,14 @@ def get_git_client() -> GitClient:
     return build_gitlab_client()
 
 
-async def get_capp_client(request: Request) -> CappDeploymentClient:
+async def get_capp_deployment_client(request: Request) -> CappDeploymentClient:
     """Reuse the async deployment coordinator selected at startup."""
     return request.app.state.capp_deployment_client
+
+
+# Compatibility aliases for existing dependency overrides during the D15/D16
+# transition. Routes use the role-specific names below.
+get_capp_client = get_capp_deployment_client
 
 
 def initialize_capp_deployment_client(
@@ -95,9 +100,12 @@ def initialize_capp_client() -> CappClient | UnconfiguredCappDeletionClient:
     return UnconfiguredCappDeletionClient()
 
 
-async def get_capp_deletion_client(request: Request) -> CappDeletionClient:
+async def get_capp_resource_client(request: Request) -> CappDeletionClient:
     """Return the adapter initialized by application startup."""
     return request.app.state.capp_client
+
+
+get_capp_deletion_client = get_capp_resource_client
 
 
 def get_event_publisher() -> AutomationEventPublisher:
@@ -111,7 +119,7 @@ def get_registry_client() -> RegistryClient:
 
 
 def get_cascade_deps(
-    capp: CappDeletionClient = Depends(get_capp_deletion_client),
+    capp: CappDeletionClient = Depends(get_capp_resource_client),
     registry: RegistryClient = Depends(get_registry_client),
     git: GitClient = Depends(get_git_client),
     publisher: ReloadPublisher = Depends(get_reload_publisher),

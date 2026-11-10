@@ -49,6 +49,7 @@ The tenant comes *from* the row, and is stamped on the SSE event so D19 routes
 it to that tenant only. Nothing about the row is returned to the caller.
 """
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -76,6 +77,7 @@ from src.exceptions import (
     AutomationNotFoundError,
     AutomationValidationError,
     BuildNotRecordedError,
+    CappPermanentError,
     CappUnavailableError,
 )
 from src.models.api.ci_webhook import (
@@ -279,6 +281,7 @@ async def apply_build_result(
     # Phase 2 — deploy (first build) or roll out (edit), no connection held.
     # Raises CappUnavailableError → 503 with the row untouched.
     created: CappDeployment | None = None
+    capp_accepted = False
     operation = "create" if target.capp_deployment_id is None else "rollout"
     secret_refs = [target.secret_name] if target.secret_name else []
     try:
@@ -289,6 +292,7 @@ async def apply_build_result(
                 image=event.image,
                 secret_refs=secret_refs,
             )
+            capp_accepted = True
         else:
             await capp.rollout(
                 automation_id=event.automation_id,
@@ -297,6 +301,33 @@ async def apply_build_result(
                 image=event.image,
                 secret_refs=secret_refs,
             )
+            capp_accepted = True
+    except CappPermanentError:
+        # A rejected image, wallet, target, or permanently unready deployment
+        # cannot be repaired by redelivery. Record build_failed and release the
+        # lock; a new edit is required.
+        if await _deletion_started(event):
+            await _tear_down(
+                event,
+                target.wallet,
+                capp_name_for(event.automation_id, target.capp_deployment_id),
+                deletion,
+            )
+        return await run_in_threadpool(_record_failure, event, events)
+    except asyncio.CancelledError:
+        # A disconnect or shutdown may cancel the wait after CAPP accepted a
+        # mutation. Give a deletion already in progress one best-effort cleanup
+        # opportunity, then preserve cancellation semantics.
+        try:
+            if await _deletion_started(event):
+                await _tear_down(
+                    event,
+                    target.wallet,
+                    capp_name_for(event.automation_id, target.capp_deployment_id),
+                    deletion,
+                )
+        finally:
+            raise
     except CappUnavailableError as exc:
         # The only server-side trace of a stuck build: the 503 handler logs
         # nothing. Type name only — the text must never reach logs (§3.4).
@@ -475,6 +506,12 @@ async def _tear_down(
         "ci-webhook: tore down the deployment for deleting automation=%s",
         event.automation_id,
     )
+
+
+async def _deletion_started(event: CiWebhookIn) -> bool:
+    """Read only the matching state after a CAPP mutation has been accepted."""
+    target = await run_in_threadpool(_read_target, event)
+    return target == IgnoredReason.DELETING
 
 
 def _record_failure(

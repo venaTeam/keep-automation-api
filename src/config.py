@@ -202,7 +202,7 @@ except (ValueError, TypeError):
 # Deployment polling policy is captured with the other startup settings.
 try:
     CAPP_READINESS_TIMEOUT_SECONDS = float(
-        os.environ.get("CAPP_READINESS_TIMEOUT_SECONDS", "600")
+        os.environ.get("CAPP_READINESS_TIMEOUT_SECONDS", "30")
     )
     CAPP_POLL_INTERVAL_SECONDS = float(
         os.environ.get("CAPP_POLL_INTERVAL_SECONDS", "1")
