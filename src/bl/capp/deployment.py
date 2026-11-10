@@ -150,9 +150,19 @@ class CappDeploymentCoordinator:
                 except CappError as exc:
                     if exc.code != CappErrorCode.CONFLICT:
                         raise
-                    resource = await self._reconcile(
-                        automation_id, wallet, name, image, secret_refs
-                    )
+                    try:
+                        resource = await self._reconcile(
+                            automation_id, wallet, name, image, secret_refs
+                        )
+                    except CappError as reconcile_error:
+                        # The object may disappear between a create conflict
+                        # and reconciliation. A later delivery can safely
+                        # create it again, so keep this race retryable.
+                        if reconcile_error.code == CappErrorCode.NOT_FOUND:
+                            raise CappError(
+                                CappErrorCode.UNAVAILABLE, retryable=True
+                            ) from None
+                        raise
                     mutation_accepted = True
                 else:
                     mutation_accepted = True
@@ -222,7 +232,10 @@ class CappDeploymentCoordinator:
             return current
         updated = await self._client.update_capp(wallet, name, spec)
         if updated.uid != current.uid:
-            raise _DeploymentIdentityConflict()
+            # CAPP may replace the object as part of an accepted update. The
+            # new UID means the mutation is ambiguous, so reconcile later
+            # instead of marking the build permanently failed.
+            raise CappError(CappErrorCode.CONFLICT)
         return updated
 
     @staticmethod
@@ -261,7 +274,7 @@ class CappDeploymentCoordinator:
             None,
         )
         return (
-            config.get("state") == "enabled"
+            config.get("state", "enabled") == "enabled"
             and current_env == requested_env
             and current_volume == requested_volume
         )

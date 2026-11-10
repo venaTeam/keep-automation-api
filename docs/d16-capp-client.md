@@ -105,8 +105,9 @@ The local mocked tests cannot prove that external traffic behavior.
 
 Errors after CAPP accepts a create or update, including authorization failures
 during readiness polling, remain retryable so reconciliation can restore the
-durable row. Only a rejection before the mutation is accepted becomes a
-permanent build failure.
+durable row. Authorization failures are always treated as transient because a
+platform-wide RBAC outage must not mark every build permanently failed. Other
+rejections before the mutation is accepted become permanent build failures.
 
 Application startup validates CAPP settings and constructs one client per app.
 Missing or invalid settings log a sanitized warning once at startup and select an

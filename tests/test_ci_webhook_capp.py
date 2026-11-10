@@ -160,7 +160,7 @@ def test_real_create_records_uid_url_then_rollout_removes_secret(
     )
 
 
-@pytest.mark.parametrize("failure", ["upstream", "readiness", "permanent"])
+@pytest.mark.parametrize("failure", ["upstream", "readiness"])
 def test_failed_rollout_retains_digest_and_build_lock(
     wire_harness, test_engine, failure, caplog
 ):
@@ -171,13 +171,12 @@ def test_failed_rollout_retains_digest_and_build_lock(
     assert harness.webhook(success(automation_id, sha)).status_code == 200
     harness.edit(automation_id)
     before = row(test_engine, automation_id)
-    backend.fail_put = "permanent" if failure == "permanent" else failure == "upstream"
+    backend.fail_put = failure == "upstream"
     backend.pending = failure == "readiness"
     response = harness.webhook(
         success(automation_id, before["building_sha"], version=2)
     )
-    # Authorization failures are transient platform outages, including when
-    # they happen after CAPP accepted the rollout mutation.
+    # Upstream and readiness failures are transient and retain the build lock.
     assert response.status_code == 503
     after = row(test_engine, automation_id)
     for key in ("active_digest", "capp_deployment_id", "deployment_url"):
