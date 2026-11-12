@@ -11,19 +11,19 @@ Responses: `200 {status: applied|ignored, reason?}` — `ignored` is a no-op
 deploy/rollout failed, or the row was busy / could not be written after CAPP
 accepted — nothing is written; redeliver. Any 5xx: redeliver.
 """
+
 from fastapi import APIRouter, Depends, status
-from fastapi.concurrency import run_in_threadpool
 
 from src.api.ci_webhook_guard import CI_WEBHOOK_PATH
 from src.api.deps import (
-    get_capp_client,
-    get_capp_deletion_client,
+    get_capp_deployment_client,
+    get_capp_resource_client,
     get_event_publisher,
     get_reload_publisher,
     verify_ci_webhook_token,
 )
 from src.bl import builds
-from src.bl.capp_client import CappClient
+from src.bl.capp.deployment import CappDeploymentClient
 from src.bl.cascade_adapters import CappDeletionClient
 from src.core.automation_events import AutomationEventPublisher
 from src.core.reload import ReloadPublisher
@@ -41,11 +41,15 @@ router = APIRouter(dependencies=[Depends(verify_ci_webhook_token)])
 )
 async def ci_webhook(
     body: CiWebhookIn,
-    capp: CappClient = Depends(get_capp_client),
+    capp: CappDeploymentClient = Depends(get_capp_deployment_client),
     reload: ReloadPublisher = Depends(get_reload_publisher),
     events: AutomationEventPublisher = Depends(get_event_publisher),
-    deletion: CappDeletionClient = Depends(get_capp_deletion_client),
+    deletion: CappDeletionClient = Depends(get_capp_resource_client),
 ) -> CiWebhookOut:
-    return await run_in_threadpool(
-        builds.apply_build_result, body, capp, reload, events, deletion
+    return await builds.apply_build_result(
+        body,
+        capp,
+        reload,
+        events,
+        deletion,
     )

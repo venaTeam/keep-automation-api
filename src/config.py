@@ -181,3 +181,47 @@ ARTIFACTORY_PASSWORD = os.environ.get("ARTIFACTORY_PASSWORD", "")
 ARTIFACTORY_TIMEOUT_SECONDS = float(
     os.environ.get("ARTIFACTORY_TIMEOUT_SECONDS", "10")
 )
+
+
+# CAPP settings are captured at process startup, like the other service settings.
+# Inject identity only through this service's deployment secret store.
+CAPP_BASE_URL = os.environ.get("CAPP_BASE_URL", "")
+CAPP_USERNAME = os.environ.get("CAPP_USERNAME", "")
+CAPP_PASSWORD = os.environ.get("CAPP_PASSWORD", "")
+CAPP_CLUSTER = os.environ.get("CAPP_CLUSTER", "")
+try:
+    CAPP_REQUEST_TIMEOUT_SECONDS = float(
+        os.environ.get("CAPP_REQUEST_TIMEOUT_SECONDS", "30")
+    )
+except (ValueError, TypeError):
+    # Preserve DELETE admission: invalid CAPP settings fail at the cleanup step.
+    # Do not log the raw value or retain the parsing exception.
+    CAPP_REQUEST_TIMEOUT_SECONDS = None
+
+
+# Deployment polling policy is captured with the other startup settings.
+try:
+    CAPP_READINESS_TIMEOUT_SECONDS = float(
+        os.environ.get("CAPP_READINESS_TIMEOUT_SECONDS", "30")
+    )
+    CAPP_POLL_INTERVAL_SECONDS = float(
+        os.environ.get("CAPP_POLL_INTERVAL_SECONDS", "1")
+    )
+except (TypeError, ValueError):
+    CAPP_READINESS_TIMEOUT_SECONDS = None
+    CAPP_POLL_INTERVAL_SECONDS = None
+
+
+def load_capp_client_settings() -> dict:
+    """Return startup settings; never reread the environment on a request."""
+    from src.bl.capp.errors import CappError, CappErrorCode
+
+    if CAPP_REQUEST_TIMEOUT_SECONDS is None:
+        raise CappError(CappErrorCode.CONFIGURATION)
+    return dict(
+        base_url=CAPP_BASE_URL,
+        username=CAPP_USERNAME,
+        password=CAPP_PASSWORD,
+        timeout_seconds=CAPP_REQUEST_TIMEOUT_SECONDS,
+        cluster=CAPP_CLUSTER,
+    )

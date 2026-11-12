@@ -5,23 +5,31 @@
 - machine tier -> GitLab secret token (`X-Gitlab-Token`, verified since D15).
 - internal tier -> service token (verified in D17/D20).
 """
+
 import hashlib
 import hmac
 import logging
 import threading
 import time
 
-from fastapi import Depends, Header, HTTPException, status
+from fastapi import Depends, Header, HTTPException, Request, status
 
 from src import config
-from src.bl.capp_client import CappClient, get_default_capp_client
+from src.bl.capp.client import CappClient
+from src.bl.capp.deployment import (
+    CappDeploymentClient,
+    CappDeploymentCoordinator,
+    UnconfiguredCappClient,
+)
 from src.bl.cascade import CascadeDeps
 from src.bl.cascade_adapters import (
     CappDeletionClient,
     RegistryClient,
-    get_default_capp_deletion_client,
+    UnconfiguredCappDeletionClient,
+    build_capp_client,
     get_default_registry_client,
 )
+from src.bl.capp.errors import CappError
 from src.bl.git_client import GitClient, build_gitlab_client
 from src.core.automation_events import (
     AutomationEventPublisher,
@@ -50,9 +58,25 @@ def get_git_client() -> GitClient:
     return build_gitlab_client()
 
 
-def get_capp_client() -> CappClient:
-    """CAPP deploy/rollout client. Fails closed until D16 wires the real one."""
-    return get_default_capp_client()
+async def get_capp_deployment_client(request: Request) -> CappDeploymentClient:
+    """Reuse the async deployment coordinator selected at startup."""
+    return request.app.state.capp_deployment_client
+
+
+def initialize_capp_deployment_client(
+    client: CappClient | UnconfiguredCappDeletionClient,
+) -> CappDeploymentClient:
+    if isinstance(client, UnconfiguredCappDeletionClient):
+        return UnconfiguredCappClient()
+    try:
+        return CappDeploymentCoordinator(
+            client,
+            readiness_timeout_seconds=config.CAPP_READINESS_TIMEOUT_SECONDS,
+            poll_interval_seconds=config.CAPP_POLL_INTERVAL_SECONDS,
+        )
+    except CappError as exc:
+        logger.warning("CAPP deployment not configured (%s)", exc.code.value)
+    return UnconfiguredCappClient()
 
 
 def get_reload_publisher() -> ReloadPublisher:
@@ -60,14 +84,25 @@ def get_reload_publisher() -> ReloadPublisher:
     return get_default_reload_publisher()
 
 
+def initialize_capp_client() -> CappClient | UnconfiguredCappDeletionClient:
+    """Validate startup settings and select the application's CAPP adapter."""
+    try:
+        return build_capp_client()
+    except CappError as exc:
+        # Keep deletion admission available; cleanup stops at the CAPP step.
+        # Correct deployment settings and restart workers to recover.
+        logger.warning("CAPP client not configured (%s)", exc.code.value)
+    return UnconfiguredCappDeletionClient()
+
+
+async def get_capp_resource_client(request: Request) -> CappDeletionClient:
+    """Return the adapter initialized by application startup."""
+    return request.app.state.capp_client
+
+
 def get_event_publisher() -> AutomationEventPublisher:
     """Automation state events for the SSE stream; a no-op without REDIS_URL."""
     return get_default_event_publisher()
-
-
-def get_capp_deletion_client() -> CappDeletionClient:
-    """CAPP Capp/Secret deletion. Fails closed until D16's client is wired."""
-    return get_default_capp_deletion_client()
 
 
 def get_registry_client() -> RegistryClient:
@@ -76,7 +111,7 @@ def get_registry_client() -> RegistryClient:
 
 
 def get_cascade_deps(
-    capp: CappDeletionClient = Depends(get_capp_deletion_client),
+    capp: CappDeletionClient = Depends(get_capp_resource_client),
     registry: RegistryClient = Depends(get_registry_client),
     git: GitClient = Depends(get_git_client),
     publisher: ReloadPublisher = Depends(get_reload_publisher),

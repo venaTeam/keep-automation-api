@@ -1,4 +1,7 @@
+
 """Deletion-aware run finalization + build fencing (D18 phase 3)."""
+
+import asyncio
 import threading
 import time
 from uuid import UUID, uuid4
@@ -52,7 +55,8 @@ def _insert_run(automation_id, state=RunState.SUBMITTED, attempts=2) -> UUID:
 def _run_row(engine, run_id):
     with engine.connect() as conn:
         return conn.execute(
-            text("SELECT * FROM automation_runs WHERE run_id = :id"), {"id": str(run_id)}
+            text("SELECT * FROM automation_runs WHERE run_id = :id"),
+            {"id": str(run_id)},
         ).one()
 
 
@@ -60,7 +64,7 @@ def _delete(automation_id, world, complete=True):
     deps = deps_for(world)
     cascade.begin_delete(TENANT, automation_id, "deleter@keep", deps.publisher)
     if complete:
-        cascade.run_cascade(automation_id, deps)
+        asyncio.run(cascade.run_cascade(automation_id, deps))
 
 
 # --- terminated_by_deletion ----------------------------------------------
@@ -87,7 +91,9 @@ def test_disrupted_submitted_run_is_terminated_by_deletion(
     assert stored.outcome_status is None  # no fabricated wrapper outcome
 
 
-def test_success_committed_during_teardown_is_preserved(test_engine, world, automation_id):
+def test_success_committed_during_teardown_is_preserved(
+    test_engine, world, automation_id
+):
     run_id = _insert_run(automation_id)
     _delete(automation_id, world, complete=False)
     assert run_finalization.complete_run_if_open(
@@ -100,7 +106,9 @@ def test_success_committed_during_teardown_is_preserved(test_engine, world, auto
     assert _run_row(test_engine, run_id).failure_class is None
 
 
-def test_late_response_cannot_overwrite_deletion_termination(test_engine, world, automation_id):
+def test_late_response_cannot_overwrite_deletion_termination(
+    test_engine, world, automation_id
+):
     run_id = _insert_run(automation_id)
     _delete(automation_id, world)
     run_finalization.finalize_terminated_by_deletion(run_id)
@@ -140,7 +148,9 @@ def test_pending_to_submitted_race_is_classified_as_termination(
             raced["done"] = True
             with test_engine.begin() as conn:
                 conn.execute(
-                    text("UPDATE automation_runs SET state = 'submitted' WHERE run_id = :id"),
+                    text(
+                        "UPDATE automation_runs SET state = 'submitted' WHERE run_id = :id"
+                    ),
                     {"id": str(run_id)},
                 )
         return real_complete(run_id_arg, expected_state=expected_state, **values)
@@ -152,14 +162,18 @@ def test_pending_to_submitted_race_is_classified_as_termination(
     assert _run_row(test_engine, run_id).suppression_reason is None
 
 
-def test_run_of_live_automation_is_not_attributed_to_deletion(test_engine, automation_id):
+def test_run_of_live_automation_is_not_attributed_to_deletion(
+    test_engine, automation_id
+):
     run_id = _insert_run(automation_id)
     with pytest.raises(AutomationLifecycleConflictError):
         run_finalization.finalize_terminated_by_deletion(run_id)
     assert _run_row(test_engine, run_id).state == "submitted"
 
 
-def test_cascade_does_not_bulk_finalize_submitted_rows(test_engine, world, automation_id):
+def test_cascade_does_not_bulk_finalize_submitted_rows(
+    test_engine, world, automation_id
+):
     """CAPP 204 is not proof a call failed — rows stay for their owner."""
     run_id = _insert_run(automation_id)
     _delete(automation_id, world)
@@ -183,19 +197,25 @@ def test_deletion_started_gate(world, automation_id, test_engine):
 
 
 @pytest.mark.parametrize("complete", [False, True], ids=["deleting", "deleted"])
-def test_late_build_mutation_after_delete_is_a_no_op(test_engine, world, automation_id, complete):
+def test_late_build_mutation_after_delete_is_a_no_op(
+    test_engine, world, automation_id, complete
+):
     _delete(automation_id, world, complete=complete)
     with get_session() as session:
         assert run_finalization.lock_for_build_mutation(session, automation_id) is None
 
 
-def test_build_mutation_lock_makes_delete_wait_then_409(test_engine, world, automation_id):
+def test_build_mutation_lock_makes_delete_wait_then_409(
+    test_engine, world, automation_id
+):
     held = threading.Event()
     release = threading.Event()
 
     def build_cutover():
         with get_session() as session:
-            automation = run_finalization.lock_for_build_mutation(session, automation_id)
+            automation = run_finalization.lock_for_build_mutation(
+                session, automation_id
+            )
             assert automation is not None
             held.set()
             release.wait(timeout=10)

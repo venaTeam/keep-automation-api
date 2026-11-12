@@ -5,14 +5,13 @@ Control-plane API for the Keep **Automations** feature — a **dedicated service
 tables, the CI webhook, SSE to the UI, git commits, and CAPP deploy/rollouts, and
 custodies the single CAPP service identity.
 
-> **Status: authoring CRUD + lifecycle orchestration + CI webhook; integration
-> pending.** The FastAPI shell, the three exposure-tier routers, authoring CRUD,
-> enable/disable, the delete cascade and the CI webhook (D15) are in place;
-> submit, the reconciler and SSE payloads are still stubs (D17, D19–D20). The
-> real CAPP client is D16: until then a success webhook fails closed with 503,
-> and the cascade's CAPP adapter is a D16 dependency. The D18 Artifactory
-> adapter uses A0 configuration and fails closed when it is absent — see
-> "Lifecycle" below.
+> **Status: authoring CRUD + lifecycle orchestration + CI webhook; integration pending.**
+> The FastAPI shell, authoring CRUD, enable/disable, delete cascade, and CI
+> webhook (D15) are in place. Submit, the reconciler, and SSE payloads remain
+> stubs (D17, D19-D20). D16 provides the async CAPP resource client used by the
+> cascade and the async D15 deployment coordinator. Successful build webhooks
+> wait for CAPP readiness before committing the digest. The D18 Artifactory
+> adapter uses A0 configuration and fails closed when it is absent.
 
 ## Database
 
@@ -90,7 +89,7 @@ Git I/O never runs inside a DB transaction or under a row lock:
   (`400 namespace_immutable` — the wallet is fixed at deploy time).
 - Every row-lock acquisition waits at most `DATABASE_LOCK_TIMEOUT_MS` (2000);
   past that the request is `503` + `Retry-After: 1`, never a statement-timeout
-  500. Code that later adds CAPP/git calls (D15/D16) must keep this shape:
+  500. New CAPP/git callers must keep this shape:
   claim, call with no session, finish.
 
 ## Lifecycle (D18)
@@ -128,8 +127,11 @@ CronJob) continues a stopped cascade. Checkpoints are compare-and-set,
 so concurrent runners are safe. The team Secret named by `secret_name`, the row,
 revisions, runs and script bytes are never deleted.
 
-**Adapters.** `CappDeletionClient` is the narrow cascade interface that D16's
-general CAPP client must implement. `ArtifactoryRegistryClient` enumerates and
+**Adapters.** `CappDeletionClient` is the async cascade interface implemented by
+D16's general CAPP client. The cascade awaits CAPP directly and runs database,
+Git, registry, and reload work in worker threads. Call `await cascade.resume_delete(...)`
+and `await cascade.deboard_wallet(...)` from async callers. The app owns and closes
+the shared HTTP connection pool. `ArtifactoryRegistryClient` enumerates and
 deletes all artifacts below the automation's configured image path; it uses A0's
 Artifactory URL, repository, prefix, and credentials. Missing configuration
 fails closed, so a DELETE never reports resources removed when they were not.
@@ -196,6 +198,12 @@ automation's build finishes. Payload, responses and the SSE event shape are in
 | `AUTOMATION_RELOAD_CHANNEL` | `reload` | Must match keep-event-handler's subscriber. |
 | `AUTOMATION_EVENTS_CHANNEL` | `automation-events` | Build events for the `GET /events` SSE stream (D19 subscribes). |
 | `REDIS_PUBLISH_TIMEOUT_SECONDS` | `1.0` | Bounds each publish; failures are logged and swallowed. |
+| `CAPP_READINESS_TIMEOUT_SECONDS` | `30` | Maximum readiness wait per webhook request; timeout returns 503 and keeps the build locked. |
+| `CAPP_POLL_INTERVAL_SECONDS` | `1` | Delay between CAPP readiness reads. |
+
+CI must retry `503` webhook responses with bounded exponential backoff through
+the build-lock deadline; readiness timeout is per delivery and cold image pulls
+may require a later delivery.
 
 Every applied outcome writes an `automation_revisions` row (`build_succeeded` /
 `build_failed`, actor `ci-webhook`). Those enum values need keep-migrations
@@ -226,9 +234,15 @@ DB-backed tests stand up a disposable Postgres (`tests/docker-compose.test.yml`)
 and build the schema from this repo's ORM metadata plus a minimal `tenant`
 stand-in — see the note at the top of `tests/conftest.py`.
 
+## CAPP integration (D16)
+
+See [the CAPP adapter guide](docs/d16-capp-client.md) for service-secret
+configuration, caller-supplied wallet targets, rollout/deletion interfaces, sanitized
+errors, and the opt-in dev hello acceptance test.
+
 ## Deferred
 
-- Business endpoints (submit, reconciler, runs, SSE payloads) — **D17, D19–D20**.
-- Real CAPP client — deploy/rollout for the CI webhook and deletion for the cascade — + run-auth key column (**D16/F24**), A0 Artifactory deployment configuration, and git archive adapter (**D14**).
+- Business endpoints (submit, reconciler, runs, SSE payloads): **D17, D19-D20**.
+- Run-auth key column (**F24**), A0 Artifactory deployment configuration, and git archive adapter (**D14**).
 - Deploy + NetworkPolicy manifests — handled out-of-repo (A0 infra).
 - Real identity-provider integration + internal-tier token verification (the machine tier's is live since D15).

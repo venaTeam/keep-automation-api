@@ -3,15 +3,19 @@
 D16's general CAPP client implements the narrow deletion interface here.
 D18 owns the Artifactory implementation; A0 supplies its deployment settings.
 Unconfigured clients raise so cleanup never reports false completion.
-Implementations run synchronously off the event loop, without a DB session,
-with explicit network timeouts and sanitized errors.
+CAPP operations are awaited; registry operations run in worker threads.
+Neither holds a DB session across external calls.
 """
+
 import threading
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from uuid import UUID
 
 from src import config
 from src.bl.registry_client import ArtifactoryRegistryClient
+
+if TYPE_CHECKING:
+    from src.bl.capp.client import CappClient
 
 
 class ExternalDependencyNotConfiguredError(RuntimeError):
@@ -19,8 +23,19 @@ class ExternalDependencyNotConfiguredError(RuntimeError):
 
 
 def capp_name_for(automation_id: UUID, capp_deployment_id: str | None) -> str:
-    """Stored resource name, or the name used by an unfinished first deploy."""
-    return capp_deployment_id or f"automation-{automation_id}"
+    """CAPP paths take names, not UIDs returned by create (D16).
+
+    Retain compatibility with rows that stored the name before D16. A UID
+    needs the deterministic name used by the deployment coordinator.
+    """
+    name = f"automation-{automation_id}"
+    if not capp_deployment_id:
+        return name
+    try:
+        UUID(capp_deployment_id)
+    except ValueError:
+        return capp_deployment_id  # Legacy rows stored the resource name.
+    return name
 
 
 def run_auth_secret_name(automation_id: UUID) -> str:
@@ -30,11 +45,11 @@ def run_auth_secret_name(automation_id: UUID) -> str:
 
 @runtime_checkable
 class CappDeletionClient(Protocol):
-    def delete_capp(self, wallet: str, name: str) -> None:
+    async def delete_capp(self, wallet: str, name: str) -> None:
         """Delete the Capp. Return on 204/404; raise on other failures."""
         ...
 
-    def delete_secret(self, wallet: str, name: str) -> None:
+    async def delete_secret(self, wallet: str, name: str) -> None:
         """Delete the Secret. Return on 204/404; raise on other failures."""
         ...
 
@@ -55,10 +70,13 @@ class RegistryClient(Protocol):
 
 
 class UnconfiguredCappDeletionClient:
-    def delete_capp(self, wallet: str, name: str) -> None:
+    async def aclose(self) -> None:
+        """The fallback owns no connections to close."""
+
+    async def delete_capp(self, wallet: str, name: str) -> None:
         raise ExternalDependencyNotConfiguredError("CAPP client not configured (D16)")
 
-    def delete_secret(self, wallet: str, name: str) -> None:
+    async def delete_secret(self, wallet: str, name: str) -> None:
         raise ExternalDependencyNotConfiguredError("CAPP client not configured (D16)")
 
 
@@ -70,13 +88,15 @@ class UnconfiguredRegistryClient:
         raise ExternalDependencyNotConfiguredError("Artifactory settings missing (A0)")
 
 
-_default_capp = UnconfiguredCappDeletionClient()
 _default_registry: RegistryClient | None = None
 _registry_lock = threading.Lock()
 
 
-def get_default_capp_deletion_client() -> CappDeletionClient:
-    return _default_capp
+def build_capp_client() -> "CappClient":
+    """Construct a client for one application's event loop; its owner closes it."""
+    from src.bl.capp.client import CappClient
+
+    return CappClient(**config.load_capp_client_settings())
 
 
 def get_default_registry_client() -> RegistryClient:

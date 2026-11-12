@@ -1,4 +1,5 @@
 """Domain exceptions raised by the BL and mapped to HTTP responses in routes."""
+
 from src.contracts.validation_errors import FieldError
 
 
@@ -80,3 +81,15 @@ class CappUnavailableError(Exception):
     (normally `building` under its lock) and the live deployment keeps serving
     the old digest (spec §6.3), so a webhook replay or the reconciler can retry. The message must never carry the CAPP
     identity (spec §3.4)."""
+
+
+class CappPermanentError(CappUnavailableError):
+    """A CAPP rejection that cannot be fixed by webhook redelivery.
+
+    D15 records the build as failed and releases its build lock. The message is
+    intentionally stable and never contains upstream response text.
+    """
+
+    def __init__(self, message: str = "CAPP rejection", *, code: str = "unknown") -> None:
+        self.code = code
+        super().__init__(message)
